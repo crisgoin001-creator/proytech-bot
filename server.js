@@ -106,6 +106,7 @@ En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación
 
 FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
 {"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
+- Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
 - sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).`;
 }
 
@@ -136,11 +137,12 @@ async function llamarModelo(system, mensajes, maxTokens = 500) {
 }
 
 async function consultarClaude(s) {
-  const crudo = await llamarModelo(construirPrompt(s), s.historial);
+  const crudo = '{' + await llamarModelo(construirPrompt(s), [...s.historial, { role: 'assistant', content: '{' }]);
   const out = extraerJSON(crudo);
   if (!out || typeof out.respuesta !== 'string') {
     console.error('Salida no JSON del modelo:', crudo);
-    return { linea: 'indefinida', intencion: 'error_formato', confianza: 'baja', consultar_admin: false, respuesta: crudo.trim() };
+    const limpio = crudo.replace(/^\{\s*/, '').trim();
+    return { linea: 'indefinida', intencion: 'error_formato', confianza: 'baja', consultar_admin: false, respuesta: limpio };
   }
   return out;
 }
@@ -155,6 +157,7 @@ ${CONOCIMIENTO}
 TAREA: Christian (gerente) te indicó qué responder al cliente. Redacta el siguiente mensaje para el cliente usando EXACTAMENTE los datos que él indicó (montos, fechas, condiciones), con tu estilo profesional y breve, continuando la conversación de forma natural. No digas que consultaste a nadie. Si conviene, cierra con UNA pregunta que avance la venta.
 Pregunta pendiente: "${consulta}"
 Indicación de Christian: "${indicacion}"
+Mantén el mismo trato (usted o tú) que venías usando con el cliente, aunque la indicación de Christian esté escrita de otra forma.
 Devuelve SOLO el texto del mensaje, sin comillas ni explicaciones.`;
   const mensajes = [...s.historial, { role: 'user', content: '[Instrucción interna, no visible al cliente] Redacta ahora el mensaje final para el cliente según la indicación de Christian.' }];
   let texto = (await llamarModelo(system, mensajes, 400)).trim().replace(/^"|"$/g, '');
