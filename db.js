@@ -6,7 +6,7 @@ const activo = !!(URL && KEY);
 const api = activo ? axios.create({
   baseURL: URL.replace(/\/$/, '') + '/rest/v1',
   timeout: 10000,
-  headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' }
+  headers: Object.assign({ apikey: KEY, 'Content-Type': 'application/json' }, KEY && KEY.startsWith('eyJ') ? { Authorization: `Bearer ${KEY}` } : {})
 }) : null;
 
 async function q(fn, def = null) {
