@@ -38,6 +38,7 @@ function obtenerSesion(tel) {
 function detectarOrigen(msg, texto) {
   if (msg.referral) return `anuncio_${msg.referral.source_type || 'meta'}`;
   const t = (texto || '').toLowerCase();
+  if (/^hola proytech academy/.test(t)) return /celular/.test(t) ? 'web_academy_movil' : 'web_academy';
   if (/vengo de la (web|p[aá]gina)|desde la web|proytechautomation/.test(t)) return 'web';
   if (/facebook|fb\b/.test(t)) return 'facebook';
   if (/instagram|\big\b/.test(t)) return 'instagram';
