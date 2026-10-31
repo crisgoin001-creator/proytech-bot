@@ -4,6 +4,7 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 const CONOCIMIENTO = require('./conocimiento');
+const db = require('./db');
 
 // ---------- Configuración (variables de entorno en Render) ----------
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -14,6 +15,12 @@ const APP_SECRET = process.env.APP_SECRET || '';            // opcional: valida 
 const ADMIN_PHONE = process.env.ADMIN_PHONE || '51993186475'; // recibe alertas de derivación
 const MODEL = process.env.MODEL || 'anthropic/claude-haiku-4.5';
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_VERSION || 'v25.0'}`;
+const CRON_SECRET = process.env.CRON_SECRET || '';
+const TEMPLATE_D3 = process.env.TEMPLATE_D3 || '';   // plantilla aprobada para recordatorio día 3
+const TEMPLATE_D7 = process.env.TEMPLATE_D7 || '';   // plantilla aprobada para recordatorio día 7
+const TEMPLATE_LANG = process.env.TEMPLATE_LANG || 'es';
+const HORA = 36e5, DIA = 24 * HORA;
+const ETAPAS_ACTIVAS = ['perfilando', 'interesado', 'pensando', 'objecion', 'listo'];
 
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
@@ -29,14 +36,42 @@ let contadorConsultas = 0;
 const datosConfirmados = [];   // lo que Christian ya respondió (se reutiliza)
 const MAX_DATOS = 40;
 
-function obtenerSesion(tel) {
+function sesionNueva(tel) {
+  return { tel, historial: [], linea: null, origen: null, nombre: null, resumen: null, pendiente: null, etapa: 'nuevo',
+    ultimoCliente: Date.now(), proximoSeguimiento: null, seguimientos: 0, llamadaSugerida: false, actualizado: Date.now(), nueva: true };
+}
+
+async function obtenerSesion(tel) {
   let s = sesiones.get(tel);
-  if (!s || Date.now() - s.actualizado > SESION_TTL_MS) {
-    s = { historial: [], linea: null, origen: null, nombre: null, pendiente: null, etapa: 'nuevo', ultimoCliente: Date.now(), seguimientos: 0, llamadaSugerida: false, actualizado: Date.now() };
-    sesiones.set(tel, s);
+  if (s && Date.now() - s.actualizado < SESION_TTL_MS) { s.actualizado = Date.now(); return s; }
+  s = sesionNueva(tel);
+  const lead = await db.cargarLead(tel);
+  if (lead) {
+    Object.assign(s, {
+      nombre: lead.nombre, linea: lead.linea, origen: lead.origen, etapa: lead.etapa || 'nuevo', resumen: lead.resumen,
+      pendiente: lead.pendiente, llamadaSugerida: lead.llamada_sugerida, seguimientos: lead.seguimientos || 0,
+      ultimoCliente: lead.ultimo_cliente ? Date.parse(lead.ultimo_cliente) : Date.now(),
+      proximoSeguimiento: lead.proximo_seguimiento ? Date.parse(lead.proximo_seguimiento) : null, nueva: false
+    });
+    s.historial = await db.cargarMensajes(tel, MAX_HISTORIAL);
   }
-  s.actualizado = Date.now();
+  sesiones.set(tel, s);
   return s;
+}
+
+async function guardarSesion(s) {
+  s.nueva = false;
+  await db.guardarLead(s);
+}
+
+async function enviarYRegistrar(s, texto) {
+  const ok = await enviarWhatsApp(s.tel, texto);
+  if (ok) {
+    s.historial.push({ role: 'assistant', content: texto });
+    if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
+    await db.guardarMensaje(s.tel, 'assistant', texto);
+  }
+  return ok;
 }
 
 // ---------- Detección de origen y línea ----------
@@ -180,36 +215,41 @@ async function enviarWhatsApp(to, body) {
 }
 
 async function consultarAdmin(tel, s, out, textoCliente) {
-  const id = ++contadorConsultas;
-  pendientes.set(id, { tel, consulta: out.pregunta_admin || out.intencion, borrador: out.borrador || '', creado: Date.now() });
+  const consulta = out.pregunta_admin || out.intencion;
+  const fila = await db.crearConsulta({ tel, consulta, borrador: out.borrador || '' });
+  const id = fila?.id || ++contadorConsultas;
+  pendientes.set(id, { tel, consulta, borrador: out.borrador || '', creado: Date.now() });
   s.pendiente = id;
+  await guardarSesion(s);
   const msg = `❓ *Consulta #${id}*\n` +
     `Cliente: +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''} · ${s.linea || out.linea || '-'} · origen ${s.origen}\n` +
     `Dijo: "${textoCliente}"\n` +
     (out.resumen_lead ? `Perfil: ${out.resumen_lead}\n` : '') +
-    `👉 ${out.pregunta_admin || out.intencion}\n` +
+    `👉 ${consulta}\n` +
     (out.borrador ? `\nBorrador:\n"${out.borrador}"\n` : '') +
     `\nResponde:  *#${id} tu indicación*` + (out.borrador ? `   o   *#${id} ok*` : '');
   await enviarWhatsApp(ADMIN_PHONE, msg);
-  console.log(JSON.stringify({ evento: 'consulta_admin', id, tel, pregunta: out.pregunta_admin }));
+  console.log(JSON.stringify({ evento: 'consulta_admin', id, tel, pregunta: consulta }));
 }
 
 // Christian responde una consulta: "#12 el precio es ..." / "#12 ok"
 async function procesarComandoAdmin(texto) {
   const t = texto.trim();
   if (/^\/pendientes$/i.test(t)) {
-    const lista = [...pendientes.entries()].map(([id, p]) => `#${id} +${p.tel}: ${p.consulta}`).join('\n');
-    await enviarWhatsApp(ADMIN_PHONE, lista || 'No hay consultas pendientes.');
+    const filas = db.activo ? await db.consultasAbiertas() : [...pendientes.entries()].map(([id, p]) => ({ id, tel: p.tel, consulta: p.consulta }));
+    await enviarWhatsApp(ADMIN_PHONE, filas.map(p => `#${p.id} +${p.tel}: ${p.consulta}`).join('\n') || 'No hay consultas pendientes.');
     return true;
   }
   if (/^\/borrardatos$/i.test(t)) {
-    datosConfirmados.length = 0;
+    datosConfirmados.length = 0; await db.borrarDatos();
     await enviarWhatsApp(ADMIN_PHONE, '🧹 Datos confirmados borrados.');
     return true;
   }
   if (/^\/leads$/i.test(t)) {
-    const lista = [...sesiones.entries()].filter(([k]) => k !== ADMIN_PHONE).map(([k, v]) => `+${k} ${v.nombre || ''} · ${v.linea || '-'} · ${v.etapa} · ${v.origen}`).join('\n');
-    await enviarWhatsApp(ADMIN_PHONE, lista || 'Sin leads en memoria.');
+    const filas = db.activo ? await db.listarLeads()
+      : [...sesiones.values()].map(v => ({ tel: v.tel, nombre: v.nombre, linea: v.linea, etapa: v.etapa, origen: v.origen, seguimientos: v.seguimientos }));
+    const lista = filas.filter(l => l.tel !== ADMIN_PHONE).map(l => `+${l.tel} ${l.nombre || ''} · ${l.linea || '-'} · ${l.etapa} · ${l.origen || ''} · seg ${l.seguimientos || 0}`).join('\n');
+    await enviarWhatsApp(ADMIN_PHONE, lista || 'Sin leads registrados.');
     return true;
   }
   if (/^\/datos$/i.test(t)) {
@@ -219,21 +259,21 @@ async function procesarComandoAdmin(texto) {
   const m = t.match(/^#(\d+)\s+([\s\S]+)$/);
   if (!m) return false;
   const id = Number(m[1]); const indicacion = m[2].trim();
-  const p = pendientes.get(id);
-  if (!p) { await enviarWhatsApp(ADMIN_PHONE, `No encuentro la consulta #${id} (puede haberse reiniciado el servidor). Usa /pendientes.`); return true; }
-  const s = obtenerSesion(p.tel);
-  let final;
-  if (/^ok$/i.test(indicacion) && p.borrador) final = p.borrador;
-  else final = await redactarConIndicacion(s, p.consulta, indicacion);
+  let p = pendientes.get(id);
+  if (!p) { const f = await db.cargarConsulta(id); if (f) p = { tel: f.tel, consulta: f.consulta, borrador: f.borrador }; }
+  if (!p) { await enviarWhatsApp(ADMIN_PHONE, `No encuentro la consulta #${id} abierta. Usa /pendientes.`); return true; }
+  const s = await obtenerSesion(p.tel);
+  const esOk = /^ok$/i.test(indicacion);
+  let final = esOk && p.borrador ? p.borrador : await redactarConIndicacion(s, p.consulta, indicacion);
   if (!final) { await enviarWhatsApp(ADMIN_PHONE, `⚠️ No pude redactar #${id}. Reintenta con otra indicación o escribe: #${id} ok`); return true; }
-  const ok = await enviarWhatsApp(p.tel, final);
-  if (ok) {
-    s.historial.push({ role: 'assistant', content: final });
-    s.pendiente = null;
-    pendientes.delete(id);
-    if (!/^ok$/i.test(indicacion)) {
-      datosConfirmados.push({ consulta: p.consulta, indicacion, fecha: new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) });
-      if (datosConfirmados.length > MAX_DATOS) datosConfirmados.shift();
+  if (await enviarYRegistrar(s, final)) {
+    s.pendiente = null; pendientes.delete(id); await db.cerrarConsulta(id);
+    s.proximoSeguimiento = Date.now() + SEGUIMIENTO_HORAS * HORA;
+    await guardarSesion(s);
+    if (!esOk) {
+      const d = { consulta: p.consulta, indicacion, fecha: new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) };
+      datosConfirmados.push(d); if (datosConfirmados.length > MAX_DATOS) datosConfirmados.shift();
+      await db.guardarDato({ consulta: d.consulta, indicacion: d.indicacion });
     }
     await enviarWhatsApp(ADMIN_PHONE, `✅ #${id} enviado a +${p.tel}:\n"${final}"`);
   } else {
@@ -257,7 +297,7 @@ async function procesarMensaje(msg, contacto) {
   if (procesados.size > 2000) procesados.delete(procesados.values().next().value);
 
   const tel = msg.from;
-  const s = obtenerSesion(tel);
+  const s = await obtenerSesion(tel);
   if (!s.nombre && contacto?.profile?.name) s.nombre = contacto.profile.name;
 
   // Mensajes que no son texto (audio, imagen, documento...)
@@ -277,7 +317,7 @@ async function procesarMensaje(msg, contacto) {
   // Comandos del administrador (#id respuesta, /pendientes, /datos, /reset)
   if (tel === ADMIN_PHONE) {
     if (texto.toLowerCase() === '/reset') {
-      sesiones.delete(tel);
+      sesiones.delete(tel); await db.borrarLead(tel);
       await enviarWhatsApp(tel, '🔄 Sesión reiniciada (modo prueba).');
       return;
     }
@@ -292,8 +332,11 @@ async function procesarMensaje(msg, contacto) {
 
   console.log(`Mensaje recibido de ${tel}: "${texto}"`);
   s.ultimoCliente = Date.now(); s.seguimientos = 0;
+  s.proximoSeguimiento = Date.now() + SEGUIMIENTO_HORAS * HORA;
+  if (s.nueva) await guardarSesion(s);
   s.historial.push({ role: 'user', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
+  await db.guardarMensaje(tel, 'user', texto);
 
   let out;
   try {
@@ -310,47 +353,105 @@ async function procesarMensaje(msg, contacto) {
   console.log(JSON.stringify({ evento: 'clasificacion', tel, origen: s.origen, linea: out.linea, intencion: out.intencion, confianza: out.confianza, consultar_admin: !!out.consultar_admin }));
 
   if (out.linea === 'personal') {
-    console.log(`Chat personal de ${tel}; el bot no responde.`);
+    console.log(`Chat personal de ${tel}; el bot no responde ni guarda historial.`);
+    sesiones.delete(tel); await db.borrarLead(tel);
     return;
   }
 
-  if (out.respuesta) {
-    s.historial.push({ role: 'assistant', content: out.respuesta });
-    await enviarWhatsApp(tel, out.respuesta);
-  }
+  if (out.respuesta) await enviarYRegistrar(s, out.respuesta);
 
   if (out.etapa) s.etapa = out.etapa;
+  if (out.resumen_lead) s.resumen = out.resumen_lead;
   if (out.consultar_admin && !s.pendiente) await consultarAdmin(tel, s, out, texto);
   if (out.sugerir_llamada && !s.llamadaSugerida) {
     s.llamadaSugerida = true;
     await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\nLlamar: tel:+${tel}`);
   }
+
+  // Cliente que no quiere: se cierra y se borra el historial (queda solo la ficha mínima)
+  if (s.etapa === 'perdido' && !s.pendiente) {
+    s.historial = []; s.proximoSeguimiento = null;
+    await db.borrarHistorial(tel);
+    console.log(JSON.stringify({ evento: 'lead_cerrado', tel }));
+  }
+  if (s.etapa === 'ganado') s.proximoSeguimiento = null;
+  await guardarSesion(s);
 }
 
-// ---------- Seguimiento automático (dentro de la ventana de 24 h) ----------
-async function revisarSeguimientos() {
-  const ahora = Date.now();
-  for (const [tel, s] of sesiones) {
-    if (tel === ADMIN_PHONE && !process.env.SEGUIMIENTO_ADMIN) continue;
-    if (!['interesado', 'pensando', 'objecion', 'perfilando'].includes(s.etapa)) continue;
-    if (s.pendiente || s.seguimientos >= 1) continue;
-    const horas = (ahora - s.ultimoCliente) / 36e5;
-    if (horas < SEGUIMIENTO_HORAS || horas >= 23.5) continue;
-    try {
-      const mensajes = [...s.historial, { role: 'user', content: '[Instrucción interna] El cliente no responde hace varias horas. Escribe UN mensaje breve de seguimiento, cálido y útil (resolver una duda, recordar el beneficio principal o proponer el siguiente paso). Sin presión, sin repetir lo ya dicho. Devuelve solo el texto.' }];
-      const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 250)).trim();
-      if (texto && await enviarWhatsApp(tel, texto)) {
-        s.historial.push({ role: 'assistant', content: texto });
-        s.seguimientos += 1;
-        console.log(JSON.stringify({ evento: 'seguimiento', tel, etapa: s.etapa }));
-      }
-    } catch (e) { console.error('Error seguimiento:', e.message); }
-  }
+// ---------- Seguimiento automático ----------
+// Paso 1 (~20 h): mensaje libre redactado por Claude (dentro de la ventana de 24 h, gratis).
+// Paso 2 (día 3) y paso 3 (día 7): plantilla aprobada por Meta. Sin plantilla → te aviso para hacerlo a mano.
+async function enviarPlantilla(tel, nombrePlantilla, nombreCliente) {
+  try {
+    await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp', to: tel, type: 'template',
+      template: { name: nombrePlantilla, language: { code: TEMPLATE_LANG },
+        components: [{ type: 'body', parameters: [{ type: 'text', text: (nombreCliente || '').split(' ')[0] || 'estimado(a)' }] }] }
+    }, { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    console.log(`Plantilla ${nombrePlantilla} enviada a ${tel}`);
+    return true;
+  } catch (e) { console.error(`Error plantilla a ${tel}:`, JSON.stringify(e.response?.data || e.message)); return false; }
 }
-setInterval(revisarSeguimientos, 15 * 60 * 1000);
+
+async function ejecutarSeguimientos() {
+  const ahora = Date.now();
+  let candidatos;
+  if (db.activo) candidatos = await Promise.all((await db.leadsParaSeguimiento()).map(l => obtenerSesion(l.tel)));
+  else candidatos = [...sesiones.values()].filter(s => ETAPAS_ACTIVAS.includes(s.etapa) && !s.pendiente && s.proximoSeguimiento && s.proximoSeguimiento <= ahora);
+  const manuales = []; let enviados = 0;
+  for (const s of candidatos) {
+    if (s.tel === ADMIN_PHONE && !process.env.SEGUIMIENTO_ADMIN) continue;
+    const horas = (ahora - s.ultimoCliente) / HORA;
+    try {
+      if (s.seguimientos === 0 && horas < 23.5) {
+        const mensajes = [...s.historial, { role: 'user', content: '[Instrucción interna] El cliente no responde hace varias horas. Escribe UN mensaje breve de seguimiento, cálido y útil (resolver una duda, recordar el beneficio principal o proponer el siguiente paso). Sin presión y sin repetir lo ya dicho. Devuelve solo el texto.' }];
+        const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 250)).trim();
+        if (texto && await enviarYRegistrar(s, texto)) enviados++;
+        s.seguimientos = 1; s.proximoSeguimiento = s.ultimoCliente + 3 * DIA;
+      } else if (s.seguimientos <= 1) {
+        if (TEMPLATE_D3 && await enviarPlantilla(s.tel, TEMPLATE_D3, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${TEMPLATE_D3}]`); }
+        else manuales.push(`+${s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — recordatorio día 3`);
+        s.seguimientos = 2; s.proximoSeguimiento = s.ultimoCliente + 7 * DIA;
+      } else if (s.seguimientos === 2) {
+        if (TEMPLATE_D7 && await enviarPlantilla(s.tel, TEMPLATE_D7, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${TEMPLATE_D7}]`); }
+        else manuales.push(`+${s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — último recordatorio día 7`);
+        s.seguimientos = 3; s.proximoSeguimiento = null;
+      } else { s.proximoSeguimiento = null; }
+      await guardarSesion(s);
+    } catch (e) { console.error('Error seguimiento', s.tel, e.message); }
+  }
+  if (manuales.length) await enviarWhatsApp(ADMIN_PHONE, `⏰ *Recordatorios para enviar a mano* (aún no hay plantilla aprobada):\n${manuales.join('\n')}`);
+  console.log(JSON.stringify({ evento: 'seguimientos', revisados: candidatos.length, enviados, manuales: manuales.length }));
+  return { revisados: candidatos.length, enviados, manuales: manuales.length };
+}
+
+async function enviarResumenDiario() {
+  const leads = db.activo ? await db.listarLeads() : [...sesiones.values()];
+  const activos = leads.filter(l => l.tel !== ADMIN_PHONE && ETAPAS_ACTIVAS.includes(l.etapa));
+  const abiertas = db.activo ? await db.consultasAbiertas() : [...pendientes.keys()];
+  const porEtapa = {}; activos.forEach(l => { porEtapa[l.etapa] = (porEtapa[l.etapa] || 0) + 1; });
+  const txt = `📊 *Resumen ProyTech* (${new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' })})\n` +
+    `Leads activos: ${activos.length} — ${Object.entries(porEtapa).map(([k, v]) => `${k}: ${v}`).join(', ') || '-'}\n` +
+    `Consultas sin responder: ${abiertas.length}${abiertas.length ? ' (usa /pendientes)' : ''}\n` +
+    (activos.length ? `\nTop:\n${activos.slice(0, 8).map(l => `• +${l.tel} ${l.nombre || ''} · ${l.linea || '-'} · ${l.etapa}`).join('\n')}` : '');
+  await enviarWhatsApp(ADMIN_PHONE, txt);
+  return { activos: activos.length, consultas: abiertas.length };
+}
+
+setInterval(() => ejecutarSeguimientos().catch(e => console.error(e)), 30 * 60 * 1000);
 
 // ---------- Endpoints ----------
-app.get('/', (_req, res) => res.send('ProyTech Bot v2 activo'));
+app.get('/', (_req, res) => res.send(`ProyTech Bot v3 activo · BD ${db.activo ? 'conectada' : 'en RAM'}`));
+
+function cronAutorizado(req) { return CRON_SECRET && req.query.key === CRON_SECRET; }
+app.get('/cron/seguimientos', async (req, res) => {
+  if (!cronAutorizado(req)) return res.sendStatus(403);
+  res.json(await ejecutarSeguimientos());
+});
+app.get('/cron/resumen', async (req, res) => {
+  if (!cronAutorizado(req)) return res.sendStatus(403);
+  res.json(await enviarResumenDiario());
+});
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -381,4 +482,9 @@ app.post('/webhook', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`ProyTech Bot v2 corriendo en el puerto ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
+  const datos = await db.cargarDatos();
+  datos.forEach(d => datosConfirmados.push({ consulta: d.consulta, indicacion: d.indicacion, fecha: new Date(d.creado).toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) }));
+  if (datos.length) console.log(`Datos confirmados cargados: ${datos.length}`);
+});
