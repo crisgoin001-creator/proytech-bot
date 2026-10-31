@@ -302,7 +302,8 @@ async function procesarMensaje(msg, contacto) {
 
   // Mensajes que no son texto (audio, imagen, documento...)
   if (msg.type !== 'text') {
-    const t = msg.type === 'interactive' ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title) : null;
+    const t = msg.type === 'interactive' ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title)
+      : msg.type === 'button' ? msg.button?.text : null; // botones de respuesta rápida de plantillas
     if (!t) {
       await enviarWhatsApp(tel, 'Gracias, recibimos su archivo. Para atenderle mejor, ¿podría indicarnos en un mensaje de texto qué necesita?');
       console.log(JSON.stringify({ evento: 'no_texto', tel, tipo: msg.type }));
