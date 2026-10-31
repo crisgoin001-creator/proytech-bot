@@ -19,7 +19,8 @@ const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // ---------- Memoria por número (en RAM; se pierde al reiniciar) ----------
-const SESION_TTL_MS = 24 * 60 * 60 * 1000;
+const SESION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // la sesión se recuerda 7 días (mientras el servidor no reinicie)
+const SEGUIMIENTO_HORAS = Number(process.env.SEGUIMIENTO_HORAS || 20); // < 24 h: dentro de la ventana gratuita de WhatsApp
 const MAX_HISTORIAL = 12;
 const sesiones = new Map();
 const procesados = new Set(); // evita responder dos veces si Meta reintenta
@@ -31,7 +32,7 @@ const MAX_DATOS = 40;
 function obtenerSesion(tel) {
   let s = sesiones.get(tel);
   if (!s || Date.now() - s.actualizado > SESION_TTL_MS) {
-    s = { historial: [], linea: null, origen: null, nombre: null, pendiente: null, actualizado: Date.now() };
+    s = { historial: [], linea: null, origen: null, nombre: null, pendiente: null, etapa: 'nuevo', ultimoCliente: Date.now(), seguimientos: 0, llamadaSugerida: false, actualizado: Date.now() };
     sesiones.set(tel, s);
   }
   s.actualizado = Date.now();
@@ -66,6 +67,14 @@ const ESTILO = `ESTILO OBLIGATORIO
 - Saluda solo en el primer mensaje de la conversación. Máximo un emoji y solo si aporta.
 - Suena natural y humana. NUNCA digas "un asesor/ingeniero/persona se comunicará", "voy a consultar", "derivo su caso" ni menciones procesos internos.
 - Nunca inventes datos que no estén en el CONOCIMIENTO o en DATOS CONFIRMADOS.
+ESTRATEGIA COMERCIAL (venta consultiva, persuasión ética)
+- Entiende primero la necesidad (situación → problema → impacto) y conecta el curso/servicio con su objetivo concreto (empleo, ascenso, reducir paradas, seguridad de la planta).
+- Destaca valor real, nunca inventado: práctica en equipos reales, máximo 2 alumnos por estación, certificado, soporte post-curso; en servicios: experiencia en normativas y marcas indicadas.
+- Objeciones: reconoce primero ("Entiendo"), luego responde con valor o una alternativa (pago en partes, separación con S/ 200). Precio: no te disculpes; compara con el beneficio.
+- Usa compromisos pequeños: ofrece el siguiente paso concreto (separar con S/ 200, coordinar una visita técnica, enviar ficha).
+- Urgencia y escasez SOLO si son reales y están en CONOCIMIENTO o DATOS CONFIRMADOS. Nunca inventes cupos, testimonios ni promociones.
+- Si dice "lo voy a pensar": valida, pregunta qué duda le queda y ofrece resolverla. No presiones más de una vez por mensaje.
+- Si dice claramente que no le interesa: agradece con cordialidad, deja la puerta abierta y no insistas.
 - Si el cliente pregunta sinceramente si habla con un bot o una persona, no lo niegues: di con naturalidad que es el asistente virtual de ProyTech y que el equipo supervisa la atención, y continúa ayudando.`;
 
 function bloqueDatosConfirmados() {
@@ -96,7 +105,8 @@ CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
 En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
 
 FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
-{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","consultar_admin":true|false,"pregunta_admin":"","borrador":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}`;
+{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
+- sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).`;
 }
 
 function extraerJSON(texto) {
@@ -146,8 +156,10 @@ TAREA: Christian (gerente) te indicó qué responder al cliente. Redacta el sigu
 Pregunta pendiente: "${consulta}"
 Indicación de Christian: "${indicacion}"
 Devuelve SOLO el texto del mensaje, sin comillas ni explicaciones.`;
-  const texto = await llamarModelo(system, s.historial, 400);
-  return texto.trim().replace(/^"|"$/g, '');
+  const mensajes = [...s.historial, { role: 'user', content: '[Instrucción interna, no visible al cliente] Redacta ahora el mensaje final para el cliente según la indicación de Christian.' }];
+  let texto = (await llamarModelo(system, mensajes, 400)).trim().replace(/^"|"$/g, '');
+  if (!texto) texto = (await llamarModelo(system, mensajes, 400)).trim().replace(/^"|"$/g, '');
+  return texto;
 }
 
 // ---------- WhatsApp ----------
@@ -187,6 +199,16 @@ async function procesarComandoAdmin(texto) {
     await enviarWhatsApp(ADMIN_PHONE, lista || 'No hay consultas pendientes.');
     return true;
   }
+  if (/^\/borrardatos$/i.test(t)) {
+    datosConfirmados.length = 0;
+    await enviarWhatsApp(ADMIN_PHONE, '🧹 Datos confirmados borrados.');
+    return true;
+  }
+  if (/^\/leads$/i.test(t)) {
+    const lista = [...sesiones.entries()].filter(([k]) => k !== ADMIN_PHONE).map(([k, v]) => `+${k} ${v.nombre || ''} · ${v.linea || '-'} · ${v.etapa} · ${v.origen}`).join('\n');
+    await enviarWhatsApp(ADMIN_PHONE, lista || 'Sin leads en memoria.');
+    return true;
+  }
   if (/^\/datos$/i.test(t)) {
     await enviarWhatsApp(ADMIN_PHONE, datosConfirmados.length ? bloqueDatosConfirmados().slice(0, 3500) : 'Aún no hay datos confirmados.');
     return true;
@@ -200,6 +222,7 @@ async function procesarComandoAdmin(texto) {
   let final;
   if (/^ok$/i.test(indicacion) && p.borrador) final = p.borrador;
   else final = await redactarConIndicacion(s, p.consulta, indicacion);
+  if (!final) { await enviarWhatsApp(ADMIN_PHONE, `⚠️ No pude redactar #${id}. Reintenta con otra indicación o escribe: #${id} ok`); return true; }
   const ok = await enviarWhatsApp(p.tel, final);
   if (ok) {
     s.historial.push({ role: 'assistant', content: final });
@@ -255,7 +278,7 @@ async function procesarMensaje(msg, contacto) {
       await enviarWhatsApp(tel, '🔄 Sesión reiniciada (modo prueba).');
       return;
     }
-    if (/^(#\d+\s|\/pendientes|\/datos)/i.test(texto)) {
+    if (/^(#\d+\s|\/pendientes|\/datos|\/borrardatos|\/leads)/i.test(texto)) {
       try { await procesarComandoAdmin(texto); } catch (e) { console.error('Error comando admin:', e.message); }
       return;
     }
@@ -265,6 +288,7 @@ async function procesarMensaje(msg, contacto) {
   if (!s.linea) s.linea = detectarLinea(texto);
 
   console.log(`Mensaje recibido de ${tel}: "${texto}"`);
+  s.ultimoCliente = Date.now(); s.seguimientos = 0;
   s.historial.push({ role: 'user', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
 
@@ -292,8 +316,35 @@ async function procesarMensaje(msg, contacto) {
     await enviarWhatsApp(tel, out.respuesta);
   }
 
+  if (out.etapa) s.etapa = out.etapa;
   if (out.consultar_admin && !s.pendiente) await consultarAdmin(tel, s, out, texto);
+  if (out.sugerir_llamada && !s.llamadaSugerida) {
+    s.llamadaSugerida = true;
+    await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\nLlamar: tel:+${tel}`);
+  }
 }
+
+// ---------- Seguimiento automático (dentro de la ventana de 24 h) ----------
+async function revisarSeguimientos() {
+  const ahora = Date.now();
+  for (const [tel, s] of sesiones) {
+    if (tel === ADMIN_PHONE && !process.env.SEGUIMIENTO_ADMIN) continue;
+    if (!['interesado', 'pensando', 'objecion', 'perfilando'].includes(s.etapa)) continue;
+    if (s.pendiente || s.seguimientos >= 1) continue;
+    const horas = (ahora - s.ultimoCliente) / 36e5;
+    if (horas < SEGUIMIENTO_HORAS || horas >= 23.5) continue;
+    try {
+      const mensajes = [...s.historial, { role: 'user', content: '[Instrucción interna] El cliente no responde hace varias horas. Escribe UN mensaje breve de seguimiento, cálido y útil (resolver una duda, recordar el beneficio principal o proponer el siguiente paso). Sin presión, sin repetir lo ya dicho. Devuelve solo el texto.' }];
+      const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 250)).trim();
+      if (texto && await enviarWhatsApp(tel, texto)) {
+        s.historial.push({ role: 'assistant', content: texto });
+        s.seguimientos += 1;
+        console.log(JSON.stringify({ evento: 'seguimiento', tel, etapa: s.etapa }));
+      }
+    } catch (e) { console.error('Error seguimiento:', e.message); }
+  }
+}
+setInterval(revisarSeguimientos, 15 * 60 * 1000);
 
 // ---------- Endpoints ----------
 app.get('/', (_req, res) => res.send('ProyTech Bot v2 activo'));
