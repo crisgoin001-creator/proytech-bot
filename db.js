@@ -21,7 +21,7 @@ module.exports = {
   guardarLead: s => q(() => api.post('/leads', {
     tel: s.tel, nombre: s.nombre, linea: s.linea, origen: s.origen, etapa: s.etapa, resumen: s.resumen || null,
     pendiente: s.pendiente || null, llamada_sugerida: !!s.llamadaSugerida, seguimientos: s.seguimientos || 0,
-    ultimo_cliente: iso(s.ultimoCliente), proximo_seguimiento: iso(s.proximoSeguimiento), actualizado: new Date().toISOString()
+    ultimo_cliente: iso(s.ultimoCliente), proximo_seguimiento: iso(s.proximoSeguimiento), pausado_hasta: iso(s.pausadoHasta), actualizado: new Date().toISOString()
   }, { headers: { Prefer: 'resolution=merge-duplicates' } })),
   borrarLead: tel => q(() => api.delete('/leads', { params: { tel: `eq.${tel}` } })),
   cargarMensajes: (tel, n) => q(async () => (await api.get('/mensajes', { params: { tel: `eq.${tel}`, select: 'rol,contenido', order: 'id.desc', limit: n } })).data.reverse().map(m => ({ role: m.rol, content: m.contenido })), []),
@@ -37,5 +37,6 @@ module.exports = {
   leadsParaSeguimiento: () => q(async () => (await api.get('/leads', { params: {
     select: '*', proximo_seguimiento: `lte.${new Date().toISOString()}`, etapa: 'in.(perfilando,interesado,pensando,objecion,listo)', pendiente: 'is.null'
   } })).data, []),
+  listarChats: () => q(async () => (await api.get('/leads', { params: { select: 'tel,nombre,linea,etapa,origen,resumen,actualizado,pausado_hasta,pendiente', order: 'actualizado.desc', limit: 100 } })).data, []),
   listarLeads: () => q(async () => (await api.get('/leads', { params: { select: 'tel,nombre,linea,etapa,origen,seguimientos,actualizado', etapa: 'not.in.(perdido)', order: 'actualizado.desc', limit: 30 } })).data, [])
 };

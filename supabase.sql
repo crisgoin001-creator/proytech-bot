@@ -41,3 +41,6 @@ alter table leads enable row level security;
 alter table mensajes enable row level security;
 alter table consultas enable row level security;
 alter table datos_confirmados enable row level security;
+
+-- v3.1: pausa del bot cuando Christian toma el control
+alter table leads add column if not exists pausado_hasta timestamptz;

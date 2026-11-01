@@ -20,6 +20,8 @@ const TEMPLATE_D3 = process.env.TEMPLATE_D3 || '';   // plantilla aprobada para 
 const TEMPLATE_D7 = process.env.TEMPLATE_D7 || '';   // plantilla aprobada para recordatorio día 7
 const TEMPLATE_LANG = process.env.TEMPLATE_LANG || 'es';
 const HORA = 36e5, DIA = 24 * HORA;
+const PAUSA_HORAS = Number(process.env.PAUSA_HORAS || 12); // horas que el bot calla cuando tú respondes
+const INBOX_KEY = process.env.INBOX_KEY || process.env.CRON_SECRET || '';
 const ETAPAS_ACTIVAS = ['perfilando', 'interesado', 'pensando', 'objecion', 'listo'];
 
 const app = express();
@@ -38,7 +40,7 @@ const MAX_DATOS = 40;
 
 function sesionNueva(tel) {
   return { tel, historial: [], linea: null, origen: null, nombre: null, resumen: null, pendiente: null, etapa: 'nuevo',
-    ultimoCliente: Date.now(), proximoSeguimiento: null, seguimientos: 0, llamadaSugerida: false, actualizado: Date.now(), nueva: true };
+    ultimoCliente: Date.now(), proximoSeguimiento: null, pausadoHasta: null, seguimientos: 0, llamadaSugerida: false, actualizado: Date.now(), nueva: true };
 }
 
 async function obtenerSesion(tel) {
@@ -51,7 +53,8 @@ async function obtenerSesion(tel) {
       nombre: lead.nombre, linea: lead.linea, origen: lead.origen, etapa: lead.etapa || 'nuevo', resumen: lead.resumen,
       pendiente: lead.pendiente, llamadaSugerida: lead.llamada_sugerida, seguimientos: lead.seguimientos || 0,
       ultimoCliente: lead.ultimo_cliente ? Date.parse(lead.ultimo_cliente) : Date.now(),
-      proximoSeguimiento: lead.proximo_seguimiento ? Date.parse(lead.proximo_seguimiento) : null, nueva: false
+      proximoSeguimiento: lead.proximo_seguimiento ? Date.parse(lead.proximo_seguimiento) : null,
+      pausadoHasta: lead.pausado_hasta ? Date.parse(lead.pausado_hasta) : null, nueva: false
     });
     s.historial = await db.cargarMensajes(tel, MAX_HISTORIAL);
   }
@@ -232,6 +235,16 @@ async function consultarAdmin(tel, s, out, textoCliente) {
   console.log(JSON.stringify({ evento: 'consulta_admin', id, tel, pregunta: consulta }));
 }
 
+// Christian responde él mismo (texto literal) y el bot se pausa en ese chat
+async function responderManual(tel, texto, avisar) {
+  const s = await obtenerSesion(tel);
+  if (s.nueva) await guardarSesion(s);
+  const ok = await enviarYRegistrar(s, texto);
+  if (ok) { s.pausadoHasta = Date.now() + PAUSA_HORAS * HORA; await guardarSesion(s); }
+  if (avisar) await enviarWhatsApp(ADMIN_PHONE, ok ? `✅ Enviado a +${tel}. Bot en pausa ${PAUSA_HORAS} h en ese chat (reactiva con /bot ${tel}).` : `⚠️ No se pudo enviar a +${tel}.`);
+  return ok;
+}
+
 // Christian responde una consulta: "#12 el precio es ..." / "#12 ok"
 async function procesarComandoAdmin(texto) {
   const t = texto.trim();
@@ -255,6 +268,13 @@ async function procesarComandoAdmin(texto) {
   if (/^\/datos$/i.test(t)) {
     await enviarWhatsApp(ADMIN_PHONE, datosConfirmados.length ? bloqueDatosConfirmados().slice(0, 3500) : 'Aún no hay datos confirmados.');
     return true;
+  }
+  const mr = t.match(/^\/r\s+\+?(\d{8,15})\s+([\s\S]+)$/i);
+  if (mr) { await responderManual(mr[1], mr[2].trim(), true); return true; }
+  const mb = t.match(/^\/bot\s+\+?(\d{8,15})$/i);
+  if (mb) {
+    const sx = await obtenerSesion(mb[1]); sx.pausadoHasta = null; await guardarSesion(sx);
+    await enviarWhatsApp(ADMIN_PHONE, `🤖 Bot reactivado para +${mb[1]}.`); return true;
   }
   const m = t.match(/^#(\d+)\s+([\s\S]+)$/);
   if (!m) return false;
@@ -322,7 +342,7 @@ async function procesarMensaje(msg, contacto) {
       await enviarWhatsApp(tel, '🔄 Sesión reiniciada (modo prueba).');
       return;
     }
-    if (/^(#\d+\s|\/pendientes|\/datos|\/borrardatos|\/leads)/i.test(texto)) {
+    if (/^(#\d+\s|\/pendientes|\/datos|\/borrardatos|\/leads|\/r\s|\/bot\s)/i.test(texto)) {
       try { await procesarComandoAdmin(texto); } catch (e) { console.error('Error comando admin:', e.message); }
       return;
     }
@@ -338,6 +358,12 @@ async function procesarMensaje(msg, contacto) {
   s.historial.push({ role: 'user', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
   await db.guardarMensaje(tel, 'user', texto);
+
+  if (s.pausadoHasta && Date.now() < s.pausadoHasta) {
+    await guardarSesion(s);
+    await enviarWhatsApp(ADMIN_PHONE, `💬 +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}: "${texto}"\n(bot en pausa — responde con /r ${tel} tu mensaje)`);
+    return;
+  }
 
   let out;
   try {
@@ -443,6 +469,8 @@ setInterval(() => ejecutarSeguimientos().catch(e => console.error(e)), 30 * 60 *
 
 // ---------- Endpoints ----------
 app.get('/', (_req, res) => res.send(`ProyTech Bot v3 activo · BD ${db.activo ? 'conectada' : 'en RAM'}`));
+
+require('./bandeja')(app, { db, sesiones, obtenerSesion, guardarSesion, responderManual, INBOX_KEY, PAUSA_HORAS });
 
 function cronAutorizado(req) { return CRON_SECRET && req.query.key === CRON_SECRET; }
 app.get('/cron/seguimientos', async (req, res) => {
