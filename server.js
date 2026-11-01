@@ -348,6 +348,15 @@ async function procesarMensaje(msg, contacto) {
     }
   }
 
+  // Derecho de eliminación (Ley 29733): "ELIMINAR MIS DATOS"
+  if (/^\s*eliminar\s+mis\s+datos\s*$/i.test(texto)) {
+    await enviarWhatsApp(tel, 'Listo. Eliminamos su historial y sus datos de contacto de nuestros registros. Si en el futuro desea escribirnos, aquí estaremos.');
+    sesiones.delete(tel); await db.borrarLead(tel);
+    await enviarWhatsApp(ADMIN_PHONE, `🗑️ +${tel} solicitó ELIMINAR MIS DATOS. Su ficha e historial fueron borrados.`);
+    console.log(JSON.stringify({ evento: 'eliminacion_datos', tel }));
+    return;
+  }
+
   if (!s.origen) s.origen = detectarOrigen(msg, texto);
   if (!s.linea) s.linea = detectarLinea(texto);
 
