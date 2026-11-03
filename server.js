@@ -201,7 +201,24 @@ function extraerJSON(texto) {
 }
 
 // ---------- Claude vía OpenRouter ----------
-let avisoSaldo = 0;
+let avisoSaldo = 0, avisoSaldoBajo = 0;
+const SALDO_MINIMO = Number(process.env.SALDO_MINIMO || 3); // US$
+// Saldo de OpenRouter (prepago): créditos comprados − usados
+async function saldoIA() {
+  try {
+    const r = await axios.get('https://openrouter.ai/api/v1/credits', { timeout: 10000, headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}` } });
+    const d = r.data?.data || {};
+    return { ok: true, saldo: Math.round(((d.total_credits || 0) - (d.total_usage || 0)) * 100) / 100, usado: Math.round((d.total_usage || 0) * 100) / 100 };
+  } catch (e) { return { ok: false, error: e.response?.status || e.message }; }
+}
+async function revisarSaldoIA() {
+  const r = await saldoIA();
+  if (r.ok && r.saldo < SALDO_MINIMO && Date.now() - avisoSaldoBajo > 24 * HORA) {
+    avisoSaldoBajo = Date.now();
+    await enviarWhatsApp(ADMIN_PHONE, `🔋 *Saldo de IA bajo*: te quedan US$ ${r.saldo.toFixed(2)} en OpenRouter.\nRecarga en https://openrouter.ai/settings/credits para que el bot siga respondiendo con la IA principal.`);
+  }
+  return r;
+}
 // opts.interna=true → primero modelos gratis (correo, revisión semanal); clientes → Haiku y, si falla, respaldo gratis
 async function llamarModelo(system, mensajes, maxTokens = 500, intento = 1, opts = {}) {
   if (opts.interna && intento === 1) {
@@ -309,7 +326,7 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
-const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
 
 // Revisa el correo de la empresa y convierte compromisos con fecha en plazos del calendario
 async function revisarCorreos(horas = 3) {
@@ -366,7 +383,8 @@ async function enviarStatus() {
     `• Consultas por responder: ${abiertas.length}\n` +
     (calientes.length ? `• Calientes: ${calientes.slice(0, 5).map(l => `${l.nombre || '+' + l.tel} (${l.linea || '-'})`).join(', ')}\n` : '') +
     `\n🗓️ *Agenda próximos 3 días*\n${await bloqueAgenda(3)}` +
-    (cal.activo ? `\n\n⏰ *Vencimientos próximos 14 días*\n${await bloqueVencimientos(14)}` : '');
+    (cal.activo ? `\n\n⏰ *Vencimientos próximos 14 días*\n${await bloqueVencimientos(14)}` : '') +
+    await saldoIA().then(r => r.ok ? `\n\n🔋 Saldo IA: US$ ${r.saldo.toFixed(2)}${r.saldo < SALDO_MINIMO ? ' ⚠️ recargar' : ''}` : '');
   await enviarWhatsApp(ADMIN_PHONE, txt);
 }
 
@@ -518,6 +536,7 @@ async function procesarComandoAdmin(texto) {
     return true;
   }
   if (/^\/status$/i.test(t)) { await enviarStatus(); return true; }
+  if (/^\/saldo$/i.test(t)) { const r = await saldoIA(); await enviarWhatsApp(ADMIN_PHONE, r.ok ? `🔋 Saldo IA (OpenRouter): US$ ${r.saldo.toFixed(2)} · usado en total: US$ ${r.usado.toFixed(2)}${r.saldo < SALDO_MINIMO ? '\n⚠️ Está bajo: recarga en https://openrouter.ai/settings/credits' : ''}` : `No pude consultar el saldo (${r.error}).`); return true; }
   const mco = t.match(/^\/correo(?:\s+(\d{1,3}))?$/i);
   if (mco) {
     if (!correo.activo) { await enviarWhatsApp(ADMIN_PHONE, 'El correo aún no está configurado (faltan IMAP_USER e IMAP_PASS en Render).'); return true; }
@@ -774,6 +793,7 @@ async function ejecutarSeguimientos() {
   }
   try { await ejecutarRecordatorios(); } catch (e) { console.error('Error recordatorios citas:', e.message); }
   try { await revisarCorreos(3); } catch (e) { console.error('Error revisión correo:', e.message); }
+  try { await revisarSaldoIA(); } catch (e) { console.error('Error saldo IA:', e.message); }
   if (manuales.length) await enviarWhatsApp(ADMIN_PHONE, `⏰ *Recordatorios para enviar a mano* (aún no hay plantilla aprobada):\n${manuales.join('\n')}`);
   console.log(JSON.stringify({ evento: 'seguimientos', revisados: candidatos.length, enviados, manuales: manuales.length }));
   return { revisados: candidatos.length, enviados, manuales: manuales.length };
@@ -799,6 +819,7 @@ setInterval(() => ejecutarSeguimientos().catch(e => console.error(e)), 30 * 60 *
 app.get('/', (_req, res) => res.send(`ProyTech Bot v3 activo · BD ${db.activo ? 'conectada' : 'en RAM'}`));
 // Diagnóstico sin datos sensibles: solo indica si el calendario responde
 app.get('/salud/calendario', async (_req, res) => { const l = await cal.libres(7); const ev = await cal.eventos(14); res.json({ activo: cal.activo, bloques_libres: l.length, eventos_14d: ev ? ev.length : null, ultimo_error: cal.ultimoError() }); });
+app.get('/salud/ia', async (_req, res) => { const r = await saldoIA(); res.json({ ok: r.ok, saldo_bajo: r.ok ? r.saldo < SALDO_MINIMO : null, error: r.error || null }); });
 app.get('/salud/correo', async (_req, res) => { const r = await correo.probar(); res.json({ activo: correo.activo, ...r }); });
 
 require('./bandeja')(app, { db, sesiones, obtenerSesion, guardarSesion, responderManual, INBOX_KEY, PAUSA_HORAS });
