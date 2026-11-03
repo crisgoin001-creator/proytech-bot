@@ -76,4 +76,23 @@ async function crearEvento({ linea, titulo, inicio, duracionMin = 60, descripcio
   } catch (e) { ultimoErr = e.response?.data?.error?.message || e.message; console.error('Calendar crear:', e.response?.data || e.message); return null; }
 }
 
-module.exports = { activo, libres, crearEvento, calendarioDe, ultimoError: () => ultimoErr };
+const fmt = dt => { const p = partesLima(dt); const l = new Date(dt.getTime() - 5 * 3600000); return `${DIAS[p.dow]} ${p.d}/${p.m} ${String(p.h).padStart(2, '0')}:${String(l.getUTCMinutes()).padStart(2, '0')}`; };
+
+// Agenda de los próximos `dias`: eventos de los calendarios ProyTech (con detalle) + bloques ocupados del personal
+async function eventos(dias = 7) {
+  if (!activo) return null;
+  try {
+    const timeMin = new Date().toISOString(), timeMax = new Date(Date.now() + dias * 86400000).toISOString();
+    const out = [];
+    for (const [nombre, id] of [['Automatización', CAL.servicios], ['Academy', CAL.academy]]) {
+      if (!id) continue;
+      const r = await api('get', `/calendars/${encodeURIComponent(id)}/events?singleEvents=true&orderBy=startTime&timeMin=${timeMin}&timeMax=${timeMax}&maxResults=30`);
+      for (const e of r.items || []) { const ini = new Date(e.start.dateTime || e.start.date); out.push({ ini, txt: `${fmt(ini)} · ${e.summary || '(sin título)'} [${nombre}]` }); }
+    }
+    const fb = await api('post', '/freeBusy', { timeMin, timeMax, timeZone: TZ, items: [{ id: CAL.principal }] });
+    for (const b of fb.calendars?.[CAL.principal]?.busy || []) { const ini = new Date(b.start); out.push({ ini, txt: `${fmt(ini)}–${fmt(new Date(b.end)).slice(-5)} · Ocupado [personal]` }); }
+    return out.sort((a, b) => a.ini - b.ini);
+  } catch (e) { ultimoErr = e.response?.data?.error?.message || e.message; console.error('Calendar eventos:', e.response?.data || e.message); return null; }
+}
+
+module.exports = { activo, libres, crearEvento, eventos, fmt, calendarioDe, ultimoError: () => ultimoErr };

@@ -270,6 +270,56 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /agenda [días] — eventos agendados\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+
+async function registrarCita(s, ev, titulo, inicio) {
+  if (!ev) return;
+  const [f, hm] = inicio.split('T');
+  await db.guardarCita({ tel: s.tel, nombre: s.nombre || null, linea: s.linea || null, titulo, inicio: new Date(`${f}T${hm}:00-05:00`).toISOString(), evento_id: ev.id || null });
+}
+
+async function bloqueAgenda(dias) {
+  const ev = await cal.eventos(dias);
+  if (ev === null) return cal.activo ? '⚠️ No pude leer el calendario.' : 'Calendario no configurado.';
+  return ev.length ? ev.map(e => '• ' + e.txt).join('\n') : 'Sin eventos.';
+}
+
+async function enviarStatus() {
+  const leads = db.activo ? await db.listarLeads() : [...sesiones.values()];
+  const activos = leads.filter(l => l.tel !== ADMIN_PHONE && ETAPAS_ACTIVAS.includes(l.etapa));
+  const porEtapa = {}; activos.forEach(l => { porEtapa[l.etapa] = (porEtapa[l.etapa] || 0) + 1; });
+  const abiertas = db.activo ? await db.consultasAbiertas() : [...pendientes.keys()];
+  const calientes = activos.filter(l => ['interesado', 'listo'].includes(l.etapa));
+  const txt = `📊 *Status ProyTech* (${hoyLima()})\n` +
+    `• Leads activos: ${activos.length}${Object.keys(porEtapa).length ? ' (' + Object.entries(porEtapa).map(([k, v]) => `${k} ${v}`).join(', ') + ')' : ''}\n` +
+    `• Consultas por responder: ${abiertas.length}\n` +
+    (calientes.length ? `• Calientes: ${calientes.slice(0, 5).map(l => `${l.nombre || '+' + l.tel} (${l.linea || '-'})`).join(', ')}\n` : '') +
+    `\n🗓️ *Agenda próximos 3 días*\n${await bloqueAgenda(3)}`;
+  await enviarWhatsApp(ADMIN_PHONE, txt);
+}
+
+// Recordatorios de citas: ~24 h antes y ~2 h antes
+async function ejecutarRecordatorios() {
+  if (!db.activo) return;
+  const citas = await db.citasProximas(26);
+  for (const c of citas) {
+    const faltan = (Date.parse(c.inicio) - Date.now()) / HORA;
+    const tipo = !c.recordado_24 && faltan <= 24 && faltan > 3 ? 'recordado_24' : (!c.recordado_2 && faltan <= 3 ? 'recordado_2' : null);
+    if (!tipo) continue;
+    const s = await obtenerSesion(c.tel);
+    const cuando = cal.fmt(new Date(c.inicio));
+    const que = (c.titulo || 'reunión').split(' – ')[0].toLowerCase();
+    const texto = tipo === 'recordado_24'
+      ? `${saludoSegunHora()}${s.nombre ? ' ' + s.nombre.split(' ')[0] : ''}, le recordamos su ${que} con ProyTech programada para el ${cuando}. ¿Nos confirma su disponibilidad?`
+      : `${saludoSegunHora()}, le recordamos que su ${que} con ProyTech es hoy a las ${cuando.slice(-5)}. Cualquier novedad, nos avisa por aquí.`;
+    let ok = false;
+    if ((Date.now() - s.ultimoCliente) / HORA < 23.5) ok = await enviarYRegistrar(s, texto);
+    else if (process.env.TEMPLATE_RECORDATORIO) ok = await enviarPlantilla(c.tel, process.env.TEMPLATE_RECORDATORIO, s.nombre);
+    if (!ok) await enviarWhatsApp(ADMIN_PHONE, `⏰ Recordar a mano a +${c.tel}${s.nombre ? ' (' + s.nombre + ')' : ''}: ${c.titulo} — ${cuando}. (Fuera de la ventana de 24 h; falta plantilla aprobada.)`);
+    await db.marcarCita(c.id, { [tipo]: true });
+  }
+}
+
 const RX_AGENDA = /visita|reuni[oó]n|llamada|agend|cita|horario|disponib|coordinar|zoom|meet/i;
 
 // Tras la confirmación de Christian: extrae fecha/hora y crea el evento en su Google Calendar
@@ -285,6 +335,7 @@ async function intentarAgendar(s, consulta, indicacion, respuestaCliente) {
     linea: s.linea, titulo: `${d.tipo || 'Reunión'} – ${quien}`, inicio: d.inicio, duracionMin: Number(d.duracion_min) || 60, lugar: d.lugar || '',
     descripcion: `Línea: ${s.linea || '-'}\nWhatsApp: https://wa.me/${s.tel}\nPerfil: ${s.resumen || '-'}\nSolicitud: ${consulta}\nIndicación: ${indicacion}`,
   });
+  await registrarCita(s, ev, `${d.tipo || 'Reunión'} – ${quien}`, d.inicio);
   const nombreCal = s.linea === 'academy' ? 'ProyTech Academy' : 'ProyTech Automatización';
   await enviarWhatsApp(ADMIN_PHONE, ev ? `📅 Agendado en *${nombreCal}*: ${d.tipo || 'Reunión'} ${d.inicio.replace('T', ' ')} con ${quien}.\nSi no corresponde, bórralo en tu Google Calendar.`
     : `⚠️ No pude crear el evento en el calendario (${d.inicio}). Revisa los logs o usa /agendar.`);
@@ -388,10 +439,16 @@ async function procesarComandoAdmin(texto) {
   const ma = t.match(/^\/agendar\s+\+?(\d{8,15})\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})(?:\s+(\d{2,3}))?\s*([\s\S]*)$/i);
   if (ma) {
     const sx = await obtenerSesion(ma[1]); const quien = sx.nombre ? `${sx.nombre} (+${ma[1]})` : `+${ma[1]}`;
-    const ev = await cal.crearEvento({ linea: sx.linea, titulo: `${ma[5].trim() || 'Reunión'} – ${quien}`, inicio: `${ma[2]}T${ma[3].padStart(5, '0')}`, duracionMin: Number(ma[4]) || 60, descripcion: `WhatsApp: https://wa.me/${ma[1]}\nPerfil: ${sx.resumen || '-'}` });
+    const tit = `${ma[5].trim() || 'Reunión'} – ${quien}`, ini = `${ma[2]}T${ma[3].padStart(5, '0')}`;
+    const ev = await cal.crearEvento({ linea: sx.linea, titulo: tit, inicio: ini, duracionMin: Number(ma[4]) || 60, descripcion: `WhatsApp: https://wa.me/${ma[1]}\nPerfil: ${sx.resumen || '-'}` });
+    await registrarCita(sx, ev, tit, ini);
     await enviarWhatsApp(ADMIN_PHONE, ev ? `📅 Evento creado: ${ma[2]} ${ma[3]} con ${quien}.` : (cal.activo ? '⚠️ No pude crear el evento. Revisa los logs.' : '⚠️ El calendario aún no está configurado.'));
     return true;
   }
+  if (/^\/status$/i.test(t)) { await enviarStatus(); return true; }
+  const mag = t.match(/^\/agenda(?:\s+(\d{1,2}))?$/i);
+  if (mag) { const n = Number(mag[1]) || 7; await enviarWhatsApp(ADMIN_PHONE, `🗓️ *Agenda próximos ${n} días*\n${await bloqueAgenda(n)}`); return true; }
+  if (/^\/(ayuda|help|comandos)$/i.test(t)) { await enviarWhatsApp(ADMIN_PHONE, AYUDA_ADMIN); return true; }
   if (/^\/libres$/i.test(t)) {
     const l = await cal.libres(7, 60, 10);
     await enviarWhatsApp(ADMIN_PHONE, l.length ? '🗓️ Libres próximos 7 días:\n' + l.map(x => '• ' + x).join('\n') : (cal.activo ? 'Sin bloques libres o error de calendario.' : 'El calendario aún no está configurado.'));
@@ -474,8 +531,10 @@ async function procesarMensaje(msg, contacto) {
       await enviarWhatsApp(tel, '🔄 Sesión reiniciada (modo prueba).');
       return;
     }
-    if (/^(#\d+\s|\/pendientes|\/datos|\/borrardatos|\/leads|\/r\s|\/bot\s)/i.test(texto)) {
-      try { await procesarComandoAdmin(texto); } catch (e) { console.error('Error comando admin:', e.message); }
+    if (/^(#\d+\s|\/)/.test(texto)) {
+      let ok = false;
+      try { ok = await procesarComandoAdmin(texto); } catch (e) { console.error('Error comando admin:', e.message); }
+      if (!ok) await enviarWhatsApp(ADMIN_PHONE, AYUDA_ADMIN);
       return;
     }
     if (/^aprob(ar|ado|o)\b/i.test(texto)) {
@@ -493,7 +552,7 @@ async function procesarMensaje(msg, contacto) {
           await enviarWhatsApp(ADMIN_PHONE, `Tienes ${abiertas.length} consultas abiertas. Responde citando (deslizando) el mensaje de la consulta, o escribe *#número tu respuesta*.\n` + abiertas.map(a => `#${a.id} +${a.tel || ''} ${a.consulta || ''}`).join('\n').slice(0, 3000));
           return;
         } else {
-          await enviarWhatsApp(ADMIN_PHONE, 'No hay consultas pendientes. Comandos: /pendientes · /leads · /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX');
+          await enviarWhatsApp(ADMIN_PHONE, 'No hay consultas pendientes.\n\n' + AYUDA_ADMIN);
           return;
         }
       }
@@ -615,6 +674,7 @@ async function ejecutarSeguimientos() {
       await guardarSesion(s);
     } catch (e) { console.error('Error seguimiento', s.tel, e.message); }
   }
+  try { await ejecutarRecordatorios(); } catch (e) { console.error('Error recordatorios citas:', e.message); }
   if (manuales.length) await enviarWhatsApp(ADMIN_PHONE, `⏰ *Recordatorios para enviar a mano* (aún no hay plantilla aprobada):\n${manuales.join('\n')}`);
   console.log(JSON.stringify({ evento: 'seguimientos', revisados: candidatos.length, enviados, manuales: manuales.length }));
   return { revisados: candidatos.length, enviados, manuales: manuales.length };
@@ -628,7 +688,8 @@ async function enviarResumenDiario() {
   const txt = `📊 *Resumen ProyTech* (${new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' })})\n` +
     `Leads activos: ${activos.length} — ${Object.entries(porEtapa).map(([k, v]) => `${k}: ${v}`).join(', ') || '-'}\n` +
     `Consultas sin responder: ${abiertas.length}${abiertas.length ? ' (usa /pendientes)' : ''}\n` +
-    (activos.length ? `\nTop:\n${activos.slice(0, 8).map(l => `• +${l.tel} ${l.nombre || ''} · ${l.linea || '-'} · ${l.etapa}`).join('\n')}` : '');
+    (activos.length ? `\nTop:\n${activos.slice(0, 8).map(l => `• +${l.tel} ${l.nombre || ''} · ${l.linea || '-'} · ${l.etapa}`).join('\n')}` : '') +
+    (cal.activo ? `\n\n🗓️ *Agenda de hoy y mañana*\n${await bloqueAgenda(2)}` : '');
   await enviarWhatsApp(ADMIN_PHONE, txt);
   return { activos: activos.length, consultas: abiertas.length };
 }
