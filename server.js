@@ -34,7 +34,8 @@ app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // ---------- Memoria por número (en RAM; se pierde al reiniciar) ----------
 const SESION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // la sesión se recuerda 7 días (mientras el servidor no reinicie)
-const SEGUIMIENTO_HORAS = Number(process.env.SEGUIMIENTO_HORAS || 20); // < 24 h: dentro de la ventana gratuita de WhatsApp
+const SEGUIMIENTO_HORAS = Number(process.env.SEGUIMIENTO_HORAS || 20);
+const PRIMER_SEG_MIN = Number(process.env.PRIMER_SEG_MIN || 10); // 1er seguimiento: minutos sin respuesta // < 24 h: dentro de la ventana gratuita de WhatsApp
 const MAX_HISTORIAL = 12;
 const sesiones = new Map();
 const procesados = new Set(); // evita responder dos veces si Meta reintenta
@@ -505,7 +506,7 @@ async function registrarEcoManual(eco) {
   // Lo que Christian responde a mano también entra al embudo de seguimiento
   if (!s.linea) s.linea = detectarLinea(texto) || detectarLinea(ultimoMensajeCliente(s));
   if (s.etapa === 'nuevo') s.etapa = 'perfilando';
-  if (!s.proximoSeguimiento && ETAPAS_ACTIVAS.includes(s.etapa)) s.proximoSeguimiento = Date.now() + SEGUIMIENTO_HORAS * HORA;
+  if (!s.proximoSeguimiento && ETAPAS_ACTIVAS.includes(s.etapa)) s.proximoSeguimiento = Date.now() + PRIMER_SEG_MIN * 60000;
   const yaPausado = s.pausadoHasta && s.pausadoHasta > Date.now();
   s.pausadoHasta = Date.now() + PAUSA_HORAS * HORA;
   await guardarSesion(s);
@@ -591,7 +592,7 @@ async function procesarComandoAdmin(texto) {
   if (await enviarYRegistrar(s, final)) {
     await registrarEjemplo(s, ctxCliente, final, 'consulta');
     s.pendiente = null; pendientes.delete(id); await db.cerrarConsulta(id);
-    s.proximoSeguimiento = Date.now() + SEGUIMIENTO_HORAS * HORA;
+    s.proximoSeguimiento = Date.now() + PRIMER_SEG_MIN * 60000;
     await guardarSesion(s);
     if (!esOk) {
       const d = { consulta: p.consulta, indicacion, ts: Date.now(), fecha: new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) };
@@ -693,7 +694,7 @@ async function procesarMensaje(msg, contacto) {
 
   console.log(`Mensaje recibido de ${tel}: "${texto}"`);
   s.ultimoCliente = Date.now(); s.seguimientos = 0;
-  s.proximoSeguimiento = Date.now() + SEGUIMIENTO_HORAS * HORA;
+  s.proximoSeguimiento = Date.now() + PRIMER_SEG_MIN * 60000;
   if (s.nueva) await guardarSesion(s);
   s.historial.push({ role: 'user', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
@@ -783,39 +784,77 @@ async function enviarPlantilla(tel, nombrePlantilla, nombreCliente, extras = [])
   } catch (e) { console.error(`Error plantilla a ${tel}:`, JSON.stringify(e.response?.data || e.message)); return false; }
 }
 
-async function ejecutarSeguimientos() {
+// ---------- Embudo de seguimiento (venta persuasiva, Perú) ----------
+// Mismo día (ventana gratuita de 24 h): 10 min → 1 h → fin del día. Luego plantillas: día 3 y día 7.
+const horaLima = () => Number(new Date().toLocaleString('en-US', { timeZone: 'America/Lima', hour: 'numeric', hour12: false })) % 24;
+function proximaHoraLima(h, m = 0) { // próximo instante en Lima a las h:m (UTC-5 fijo)
+  const ahora = new Date(); const l = new Date(ahora.getTime() - 5 * HORA);
+  let t = Date.UTC(l.getUTCFullYear(), l.getUTCMonth(), l.getUTCDate(), h + 5, m);
+  if (t <= ahora.getTime()) t += DIA;
+  return t;
+}
+const INSTRUCCION_PASO = {
+  0: 'Han pasado unos minutos y el cliente no responde. Escribe UN mensaje muy breve (1–2 líneas) preguntando si pudo revisar la información y si desea algún detalle adicional (Academy: temario, horarios, forma de pago; Servicios: alcance, plazos, referencias). Una sola pregunta, cordial, sin presión.',
+  1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → visitar el laboratorio y ver los equipos Siemens reales; Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
+  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (2–3 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Usa urgencia SOLO si es real y está en CONOCIMIENTO o DATOS CONFIRMADOS (ej. grupo con fecha de inicio, máximo 2 alumnos por estación). Deséale buena noche/tarde según la hora.',
+};
+async function seguimientoLibre(s, paso) {
+  const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${INSTRUCCION_PASO[paso]} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
+  const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nFECHA DE HOY (Lima): ' + hoyLima() + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 250)).trim();
+  return texto && await enviarYRegistrar(s, texto);
+}
+
+async function procesarEmbudo() {
   const ahora = Date.now();
   let candidatos;
   if (db.activo) candidatos = await Promise.all((await db.leadsParaSeguimiento()).map(l => obtenerSesion(l.tel)));
   else candidatos = [...sesiones.values()].filter(s => ETAPAS_ACTIVAS.includes(s.etapa) && !s.pendiente && s.proximoSeguimiento && s.proximoSeguimiento <= ahora);
   const manuales = []; let enviados = 0;
+  const h = horaLima();
   for (const s of candidatos) {
     if (s.tel === ADMIN_PHONE && !process.env.SEGUIMIENTO_ADMIN) continue;
-    const horas = (ahora - s.ultimoCliente) / HORA;
+    if (s.pausadoHasta && s.pausadoHasta > ahora) continue; // Christian está atendiendo ese chat
+    const finVentana = s.ultimoCliente + 23 * HORA;            // ventana gratuita de WhatsApp (24 h) con margen
     try {
-      if (s.seguimientos === 0 && horas < 23.5) {
-        const mensajes = [...s.historial, { role: 'user', content: '[Instrucción interna] El cliente no responde hace varias horas. Escribe UN mensaje breve de seguimiento, cálido y útil (resolver una duda, recordar el beneficio principal o proponer el siguiente paso). Sin presión y sin repetir lo ya dicho. Devuelve solo el texto.' }];
-        const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 250)).trim();
-        if (texto && await enviarYRegistrar(s, texto)) enviados++;
-        s.seguimientos = 1; s.proximoSeguimiento = s.ultimoCliente + 3 * DIA;
-      } else if (s.seguimientos <= 1) {
-        if (TEMPLATE_D3 && await enviarPlantilla(s.tel, TEMPLATE_D3, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${TEMPLATE_D3}]`); }
-        else manuales.push(`+${s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — recordatorio día 3`);
-        s.seguimientos = 2; s.proximoSeguimiento = s.ultimoCliente + 7 * DIA;
-      } else if (s.seguimientos === 2) {
-        if (TEMPLATE_D7 && await enviarPlantilla(s.tel, TEMPLATE_D7, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${TEMPLATE_D7}]`); }
-        else manuales.push(`+${s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — último recordatorio día 7`);
-        s.seguimientos = 3; s.proximoSeguimiento = null;
-      } else { s.proximoSeguimiento = null; }
+      const paso = s.seguimientos || 0;
+      if (paso <= 2) {
+        if (ahora > finVentana) { s.seguimientos = 3; s.proximoSeguimiento = s.ultimoCliente + 3 * DIA; }
+        else if (h < 8 || h >= 21) { // de noche no se escribe: se pasa a las 8:30 si sigue la ventana
+          const manana = proximaHoraLima(8, 30);
+          if (manana < finVentana) s.proximoSeguimiento = manana; else { s.seguimientos = 3; s.proximoSeguimiento = s.ultimoCliente + 3 * DIA; }
+        } else {
+          if (await seguimientoLibre(s, paso)) enviados++;
+          s.seguimientos = paso + 1;
+          if (paso === 0) s.proximoSeguimiento = Date.now() + 50 * 60000;            // ~1 h desde la respuesta
+          else if (paso === 1) {                                                   // fin del día (~19:30) o +3 h
+            let t = proximaHoraLima(19, 30); if (t - Date.now() > 12 * HORA || t - Date.now() < 2 * HORA) t = Date.now() + 3 * HORA;
+            s.proximoSeguimiento = Math.min(t, finVentana);
+          } else s.proximoSeguimiento = s.ultimoCliente + 3 * DIA;
+        }
+      } else if (paso === 3 || paso === 4) {
+        if (h < 9 || h >= 20) { s.proximoSeguimiento = proximaHoraLima(9, 30); }
+        else {
+          const tpl = paso === 3 ? TEMPLATE_D3 : TEMPLATE_D7;
+          if (tpl && await enviarPlantilla(s.tel, tpl, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${tpl}]`); }
+          else manuales.push(`${esTelefono(s.tel) ? '+' + s.tel : s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — recordatorio día ${paso === 3 ? 3 : 7}`);
+          s.seguimientos = paso + 1;
+          s.proximoSeguimiento = paso === 3 ? s.ultimoCliente + 7 * DIA : null;
+        }
+      } else s.proximoSeguimiento = null;
       await guardarSesion(s);
     } catch (e) { console.error('Error seguimiento', s.tel, e.message); }
   }
+  if (manuales.length) await enviarWhatsApp(ADMIN_PHONE, `⏰ *Recordatorios para enviar a mano*:\n${manuales.join('\n')}`);
+  if (candidatos.length) console.log(JSON.stringify({ evento: 'embudo', revisados: candidatos.length, enviados, manuales: manuales.length }));
+  return { revisados: candidatos.length, enviados, manuales: manuales.length };
+}
+
+async function ejecutarSeguimientos() {
+  const r = await procesarEmbudo();
   try { await ejecutarRecordatorios(); } catch (e) { console.error('Error recordatorios citas:', e.message); }
   try { await revisarCorreos(3); } catch (e) { console.error('Error revisión correo:', e.message); }
   try { await revisarSaldoIA(); } catch (e) { console.error('Error saldo IA:', e.message); }
-  if (manuales.length) await enviarWhatsApp(ADMIN_PHONE, `⏰ *Recordatorios para enviar a mano* (aún no hay plantilla aprobada):\n${manuales.join('\n')}`);
-  console.log(JSON.stringify({ evento: 'seguimientos', revisados: candidatos.length, enviados, manuales: manuales.length }));
-  return { revisados: candidatos.length, enviados, manuales: manuales.length };
+  return r;
 }
 
 async function enviarResumenDiario() {
@@ -833,6 +872,9 @@ async function enviarResumenDiario() {
 }
 
 setInterval(() => ejecutarSeguimientos().catch(e => console.error(e)), 30 * 60 * 1000);
+setInterval(() => procesarEmbudo().catch(e => console.error(e)), 2 * 60 * 1000);
+// Render (plan gratis) duerme tras 15 min sin tráfico: en horario comercial se mantiene despierto para cumplir los seguimientos de 10 min / 1 h
+setInterval(() => { const h = horaLima(); if (h >= 7 && h < 22 && process.env.RENDER_EXTERNAL_URL) axios.get(process.env.RENDER_EXTERNAL_URL, { timeout: 15000 }).catch(() => {}); }, 10 * 60 * 1000);
 
 // ---------- Endpoints ----------
 app.get('/', (_req, res) => res.send(`ProyTech Bot v3 activo · BD ${db.activo ? 'conectada' : 'en RAM'}`));
