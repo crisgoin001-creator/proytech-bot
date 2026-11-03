@@ -118,7 +118,7 @@ const ESTILO = `ESTILO OBLIGATORIO
 - UNA sola pregunta de perfilamiento por mensaje.
 - FORMATO WHATSAPP: no uses asteriscos, negritas, almohadillas ni Markdown. Si enumeras 2 a 4 puntos, usa viñetas "• " (una por línea, frases cortas). Para todo lo demás, texto corrido.
 - Saluda solo en el primer mensaje de la conversación. Máximo un emoji y solo si aporta.
-- Suena natural y humana. NUNCA digas "un asesor/ingeniero/persona se comunicará", "voy a consultar", "derivo su caso" ni menciones procesos internos.
+- Suena natural y humana. NUNCA digas "un asesor/persona se comunicará", "voy a consultar", "derivo su caso" ni menciones procesos internos. Única excepción: al ofrecer la LLAMADA PERSONAL sí puedes decir "uno de nuestros ingenieros le llamará". Nunca des nombres del equipo.
 - Nunca inventes datos que no estén en el CONOCIMIENTO o en DATOS CONFIRMADOS.
 AGENDA (visitas, reuniones, llamadas, visitas técnicas a planta)
 - Tú NO tienes acceso a la agenda: nunca confirmes, agendes ni des por hecho una fecha u hora.
@@ -128,8 +128,8 @@ AGENDA (visitas, reuniones, llamadas, visitas técnicas a planta)
 - Ofrece "coordinar una visita" como siguiente paso, nunca como algo ya agendado.
 ESTRATEGIA COMERCIAL (venta consultiva, persuasión ética)
 - Cultura peruana: al cliente le da confianza el trato cercano, que le insistan con amabilidad y que lo llamen. Usa su nombre, sé cálida y muestra interés genuino en su caso.
-- LLAMADA PERSONAL: cuando el cliente muestre interés, dudas o diga que lo va a pensar, ofrece UNA vez una llamada breve con el Ing. Christian Gordillo (gerente de ProyTech e instructor del curso): "Si le parece, el Ing. Christian Gordillo puede llamarle 5 minutos para resolver sus dudas y coordinar su visita. ¿A qué hora le acomoda?". Si no conoces su número (TELÉFONO VISIBLE: no), pídele el número al que le pueden llamar.
-- Si el cliente ACEPTA la llamada o da un horario/número: consultar_admin=true y pregunta_admin="📞 Acepta llamada — horario: … — número: …" (pon el número si lo dio). En la respuesta agradece y di que le confirmas la hora en un momento. Nunca confirmes tú la hora.
+- LLAMADA PERSONAL: cuando el cliente muestre interés, dudas o diga que lo va a pensar, ofrece UNA vez una llamada breve por WhatsApp con uno de nuestros ingenieros: "Si le parece, uno de nuestros ingenieros puede llamarle por WhatsApp unos 5 minutos para resolver sus dudas y coordinar su visita. ¿A qué hora le acomoda?". No pidas su número: la llamada se hace por este mismo chat de WhatsApp. No menciones nombres del equipo.
+- Si el cliente ACEPTA la llamada o da un horario: consultar_admin=true y pregunta_admin="📞 Acepta llamada por WhatsApp — horario: …". En la respuesta agradece y di que le confirmas la hora en un momento. Nunca confirmes tú la hora.
 - Entiende primero la necesidad (situación → problema → impacto) y conecta el curso/servicio con su objetivo concreto (empleo, ascenso, reducir paradas, seguridad de la planta).
 - Destaca valor real, nunca inventado: práctica en equipos reales, máximo 2 alumnos por estación, certificado, soporte post-curso; en servicios: experiencia en normativas y marcas indicadas.
 - Objeciones: reconoce primero ("Entiendo"), luego responde con valor o una alternativa (pago en partes, separación con S/ 200). Precio: no te disculpes; compara con el beneficio.
@@ -198,7 +198,7 @@ ESTADO DE LA CONVERSACIÓN
 - Origen del contacto: ${s.origen || 'desconocido'}
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
 - Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
-- TELÉFONO VISIBLE: ${esTelefono(s.tel) ? 'sí' : 'no (el cliente usa nombre de usuario; si acepta una llamada, pídele su número)'}`;
+`;
 }
 
 function extraerJSON(texto) {
@@ -759,7 +759,7 @@ async function procesarMensaje(msg, contacto) {
   }
   if (out.sugerir_llamada && !s.llamadaSugerida) {
     s.llamadaSugerida = true;
-    await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\n${esTelefono(tel) ? 'Llamar: tel:+' + tel : 'Sin número visible (usa nombre de usuario): el bot le pedirá su número.'}`);
+    await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\nLlámalo por WhatsApp desde el chat del 972${esTelefono(tel) ? ' (o tel:+' + tel + ')' : ''}.`);
   }
   if (out.pedir_video && !s.videoPedido) {
     s.videoPedido = true;
@@ -808,7 +808,7 @@ function fechaPlantilla(s, i) { // día N tras el último mensaje del cliente, a
 const INSTRUCCION_PASO = {
   0: 'Han pasado unos minutos y el cliente no responde. Escribe UN mensaje muy breve (1–2 líneas) preguntando si pudo revisar la información y si desea algún detalle adicional (Academy: temario, horarios, forma de pago; Servicios: alcance, plazos, referencias). Una sola pregunta, cordial, sin presión.',
   1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → visitar el laboratorio y ver los equipos Siemens reales; Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
-  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (2–3 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Usa urgencia SOLO si es real y está en CONOCIMIENTO o DATOS CONFIRMADOS (ej. grupo con fecha de inicio, máximo 2 alumnos por estación). Si aún no se le ofreció, ofrece que el Ing. Christian Gordillo le llame 5 minutos para resolver sus dudas (si no hay teléfono visible, pide el número). Deséale buena tarde/noche según la hora.',
+  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (2–3 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Usa urgencia SOLO si es real y está en CONOCIMIENTO o DATOS CONFIRMADOS (ej. grupo con fecha de inicio, máximo 2 alumnos por estación). Si aún no se le ofreció, ofrece que uno de nuestros ingenieros le llame por WhatsApp 5 minutos para resolver sus dudas (sin pedir número y sin dar nombres). Deséale buena tarde/noche según la hora.',
 };
 async function seguimientoLibre(s, paso) {
   const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${INSTRUCCION_PASO[paso]} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
@@ -850,7 +850,7 @@ async function procesarEmbudo() {
           if (tpl && await enviarPlantilla(s.tel, tpl, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${tpl}]`); }
           else manuales.push(`${esTelefono(s.tel) ? '+' + s.tel : s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — recordatorio ${paso === 3 ? '1' : '2 (último)'}`);
           // Lead que no responde a la plantilla: en Perú una llamada suele destrabarlo
-          if (paso === 3 && esTelefono(s.tel) && ['interesado', 'pensando', 'objecion', 'listo'].includes(s.etapa)) await enviarWhatsApp(ADMIN_PHONE, `📞 *Llama hoy* a +${s.tel}${s.nombre ? ' (' + s.nombre + ')' : ''} · ${s.linea || '-'} · ${s.etapa}\nNo responde desde hace ${Math.round((Date.now() - s.ultimoCliente) / DIA)} días. Perfil: ${s.resumen || '-'}\nLlamar: tel:+${s.tel}`);
+          if (paso === 3 && ['interesado', 'pensando', 'objecion', 'listo'].includes(s.etapa)) await enviarWhatsApp(ADMIN_PHONE, `📞 *Llama hoy* a ${esTelefono(s.tel) ? '+' + s.tel : s.tel}${s.nombre ? ' (' + s.nombre + ')' : ''} · ${s.linea || '-'} · ${s.etapa}\nNo responde desde hace ${Math.round((Date.now() - s.ultimoCliente) / DIA)} días. Perfil: ${s.resumen || '-'}\nLlámalo por WhatsApp desde el chat del 972.`);
           s.seguimientos = paso + 1;
           s.proximoSeguimiento = paso === 3 ? fechaPlantilla(s, 1) : null;
         }
