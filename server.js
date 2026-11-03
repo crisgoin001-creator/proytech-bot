@@ -490,6 +490,7 @@ function bloqueEjemplos(s) {
 }
 
 // Mensaje enviado por Christian desde la app (coexistencia): se guarda y el bot se pausa en ese chat
+let ultimoPausado = null;
 async function registrarEcoManual(eco) {
   const tel = eco.to || eco.to_user_id;
   if (!tel || tel === ADMIN_PHONE) return; // chat interno con Christian
@@ -501,8 +502,11 @@ async function registrarEcoManual(eco) {
   s.historial.push({ role: 'assistant', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
   await db.guardarMensaje(tel, 'assistant', texto);
+  const yaPausado = s.pausadoHasta && s.pausadoHasta > Date.now();
   s.pausadoHasta = Date.now() + PAUSA_HORAS * HORA;
   await guardarSesion(s);
+  ultimoPausado = tel;
+  if (!yaPausado) await enviarWhatsApp(ADMIN_PHONE, `⏸️ Respondiste desde la app a ${esTelefono(tel) ? '+' + tel : tel}${s.nombre ? ' (' + s.nombre + ')' : ''}: el bot se pausa ${PAUSA_HORAS} h en ese chat.\nPara que el bot continúe ya: */bot ultimo*`);
   console.log(JSON.stringify({ evento: 'eco_app', tel, pausa_h: PAUSA_HORAS }));
 }
 
@@ -559,6 +563,11 @@ async function procesarComandoAdmin(texto) {
   }
   const mr = t.match(/^\/r\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)\s+([\s\S]+)$/i);
   if (mr) { await responderManual(mr[1], mr[2].trim(), true); return true; }
+  if (/^\/bot\s+ultimo$/i.test(t)) {
+    if (!ultimoPausado) { await enviarWhatsApp(ADMIN_PHONE, 'No hay un chat pausado recientemente.'); return true; }
+    const sx = await obtenerSesion(ultimoPausado); sx.pausadoHasta = null; await guardarSesion(sx);
+    await enviarWhatsApp(ADMIN_PHONE, `🤖 Bot reactivado para ${sx.nombre || ultimoPausado}. Responderá su próximo mensaje.`); return true;
+  }
   const mb = t.match(/^\/bot\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)$/i);
   if (mb) {
     const sx = await obtenerSesion(mb[1]); sx.pausadoHasta = null; await guardarSesion(sx);
