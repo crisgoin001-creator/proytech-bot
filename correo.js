@@ -37,4 +37,13 @@ async function correosDesde(desde, max = 25) {
   return out;
 }
 
-module.exports = { activo, correosDesde };
+// Diagnóstico: solo conecta y cuenta (sin contenido)
+async function probar() {
+  if (!activo) return { ok: false, error: 'sin credenciales' };
+  const cli = new ImapFlow({ host: HOST, port: 993, secure: true, auth: { user: USER, pass: PASS }, logger: false });
+  try { await cli.connect(); const st = await cli.status('INBOX', { messages: true }); return { ok: true, mensajes_inbox: st.messages }; }
+  catch (e) { return { ok: false, error: e.authenticationFailed ? 'usuario o contraseña incorrectos' : e.message }; }
+  finally { try { await cli.logout(); } catch (_) {} }
+}
+
+module.exports = { activo, correosDesde, probar };

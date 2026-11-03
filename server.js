@@ -742,7 +742,8 @@ setInterval(() => ejecutarSeguimientos().catch(e => console.error(e)), 30 * 60 *
 // ---------- Endpoints ----------
 app.get('/', (_req, res) => res.send(`ProyTech Bot v3 activo · BD ${db.activo ? 'conectada' : 'en RAM'}`));
 // Diagnóstico sin datos sensibles: solo indica si el calendario responde
-app.get('/salud/calendario', async (_req, res) => { const l = await cal.libres(7); res.json({ activo: cal.activo, bloques_libres: l.length, ultimo_error: cal.ultimoError() }); });
+app.get('/salud/calendario', async (_req, res) => { const l = await cal.libres(7); const ev = await cal.eventos(14); res.json({ activo: cal.activo, bloques_libres: l.length, eventos_14d: ev ? ev.length : null, ultimo_error: cal.ultimoError() }); });
+app.get('/salud/correo', async (_req, res) => { const r = await correo.probar(); res.json({ activo: correo.activo, ...r }); });
 
 require('./bandeja')(app, { db, sesiones, obtenerSesion, guardarSesion, responderManual, INBOX_KEY, PAUSA_HORAS });
 
