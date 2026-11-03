@@ -502,6 +502,10 @@ async function registrarEcoManual(eco) {
   s.historial.push({ role: 'assistant', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
   await db.guardarMensaje(tel, 'assistant', texto);
+  // Lo que Christian responde a mano también entra al embudo de seguimiento
+  if (!s.linea) s.linea = detectarLinea(texto) || detectarLinea(ultimoMensajeCliente(s));
+  if (s.etapa === 'nuevo') s.etapa = 'perfilando';
+  if (!s.proximoSeguimiento && ETAPAS_ACTIVAS.includes(s.etapa)) s.proximoSeguimiento = Date.now() + SEGUIMIENTO_HORAS * HORA;
   const yaPausado = s.pausadoHasta && s.pausadoHasta > Date.now();
   s.pausadoHasta = Date.now() + PAUSA_HORAS * HORA;
   await guardarSesion(s);
