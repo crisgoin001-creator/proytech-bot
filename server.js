@@ -35,6 +35,7 @@ const sesiones = new Map();
 const procesados = new Set(); // evita responder dos veces si Meta reintenta
 const pendientes = new Map();  // id -> consulta esperando respuesta de Christian
 let contadorConsultas = 0;
+const mensajeAConsulta = new Map(); // id del mensaje de WhatsApp enviado a Christian -> nº de consulta
 const datosConfirmados = [];   // lo que Christian ya respondió (se reutiliza)
 const MAX_DATOS = 40;
 
@@ -236,11 +237,11 @@ function formatearParaCliente(t) {
 // ---------- WhatsApp ----------
 async function enviarWhatsApp(to, body) {
   try {
-    await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`,
+    const r = await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: 'whatsapp', to, type: 'text', text: { body } },
       { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
     console.log(`Respuesta enviada exitosamente a ${to}: ${JSON.stringify(body)}`);
-    return true;
+    return r.data?.messages?.[0]?.id || true;
   } catch (e) {
     console.error(`Error enviando a ${to}:`, JSON.stringify(e.response?.data || e.message));
     return false;
@@ -261,7 +262,8 @@ async function consultarAdmin(tel, s, out, textoCliente) {
     `👉 ${consulta}\n` +
     (out.borrador ? `\nBorrador:\n"${out.borrador}"\n` : '') +
     `\nResponde:  *#${id} tu indicación*` + (out.borrador ? `   o   *#${id} ok*` : '');
-  await enviarWhatsApp(ADMIN_PHONE, msg);
+  const wamid = await enviarWhatsApp(ADMIN_PHONE, msg);
+  if (typeof wamid === 'string') mensajeAConsulta.set(wamid, id);
   console.log(JSON.stringify({ evento: 'consulta_admin', id, tel, pregunta: consulta }));
 }
 
@@ -278,6 +280,7 @@ async function responderManual(tel, texto, avisar) {
 // Mensaje enviado por Christian desde la app (coexistencia): se guarda y el bot se pausa en ese chat
 async function registrarEcoManual(eco) {
   const tel = eco.to;
+  if (tel === ADMIN_PHONE) return; // chat interno con Christian
   const texto = eco.text?.body || (eco.type ? `[${eco.type} enviado desde la app]` : '');
   if (!tel || !texto) return;
   const s = await obtenerSesion(tel);
@@ -391,6 +394,23 @@ async function procesarMensaje(msg, contacto) {
       try { await procesarComandoAdmin(texto); } catch (e) { console.error('Error comando admin:', e.message); }
       return;
     }
+    // Respuesta sin "#id": 1) si citó (respondió) el mensaje de la consulta; 2) si hay una sola consulta abierta
+    if (!process.env.ADMIN_ES_CLIENTE) {
+      let idc = msg.context?.id ? mensajeAConsulta.get(msg.context.id) : null;
+      if (!idc) {
+        const abiertas = db.activo ? await db.consultasAbiertas() : [...pendientes.keys()].map(id => ({ id }));
+        if (abiertas.length === 1) idc = abiertas[0].id;
+        else if (abiertas.length > 1) {
+          await enviarWhatsApp(ADMIN_PHONE, `Tienes ${abiertas.length} consultas abiertas. Responde citando (deslizando) el mensaje de la consulta, o escribe *#número tu respuesta*.\n` + abiertas.map(a => `#${a.id} +${a.tel || ''} ${a.consulta || ''}`).join('\n').slice(0, 3000));
+          return;
+        } else {
+          await enviarWhatsApp(ADMIN_PHONE, 'No hay consultas pendientes. Comandos: /pendientes · /leads · /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX');
+          return;
+        }
+      }
+      try { await procesarComandoAdmin(`#${idc} ${texto}`); } catch (e) { console.error('Error respuesta admin:', e.message); }
+      return;
+    }
   }
 
   // Derecho de eliminación (Ley 29733): "ELIMINAR MIS DATOS"
@@ -446,7 +466,8 @@ async function procesarMensaje(msg, contacto) {
   if (out.consultar_admin && !s.pendiente) await consultarAdmin(tel, s, out, texto);
   else if (out.consultar_admin && s.pendiente) {
     // consulta abierta: reenviar a Christian la nueva información del cliente
-    await enviarWhatsApp(ADMIN_PHONE, `📝 *Actualización consulta #${s.pendiente}* (+${tel}${s.nombre ? ' ' + s.nombre : ''})\nCliente: "${texto}"\n${out.pregunta_admin ? '👉 ' + out.pregunta_admin + '\n' : ''}Responde: *#${s.pendiente} tu indicación*`);
+    const wid = await enviarWhatsApp(ADMIN_PHONE, `📝 *Actualización consulta #${s.pendiente}* (+${tel}${s.nombre ? ' ' + s.nombre : ''})\nCliente: "${texto}"\n${out.pregunta_admin ? '👉 ' + out.pregunta_admin + '\n' : ''}Responde: *#${s.pendiente} tu indicación*`);
+    if (typeof wid === 'string') mensajeAConsulta.set(wid, s.pendiente);
   }
   if (out.sugerir_llamada && !s.llamadaSugerida) {
     s.llamadaSugerida = true;
