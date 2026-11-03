@@ -5,6 +5,7 @@ on:
   schedule:
     - cron: '17 * * * *'     # cada hora: seguimientos
     - cron: '7 13 * * *'     # 13:07 UTC = 8:07 a.m. Lima: resumen diario
+    - cron: '23 13 * * 1'    # lunes 8:23 a.m. Lima: revisión semanal del estratega
   workflow_dispatch: {}
 jobs:
   tick:
@@ -13,8 +14,11 @@ jobs:
       - name: Despertar servidor
         run: curl -s -m 90 https://proytech-bot.onrender.com/ || true
       - name: Seguimientos
-        if: github.event.schedule != '7 13 * * *'
+        if: github.event.schedule != '7 13 * * *' && github.event.schedule != '23 13 * * 1'
         run: curl -s -m 120 "https://proytech-bot.onrender.com/cron/seguimientos?key=${{ secrets.CRON_SECRET }}"
       - name: Resumen diario
         if: github.event.schedule == '7 13 * * *'
         run: curl -s -m 120 "https://proytech-bot.onrender.com/cron/resumen?key=${{ secrets.CRON_SECRET }}"
+      - name: Revisión semanal
+        if: github.event.schedule == '23 13 * * 1'
+        run: curl -s -m 170 "https://proytech-bot.onrender.com/cron/semanal?key=${{ secrets.CRON_SECRET }}"

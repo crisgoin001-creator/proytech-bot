@@ -48,3 +48,20 @@ alter table leads add column if not exists pausado_hasta timestamptz;
 -- v3.2: citar consultas aunque el servidor se reinicie
 alter table consultas add column if not exists wamid text;
 create index if not exists consultas_wamid_idx on consultas(wamid);
+
+-- v3.3: biblioteca de estilo de Christian
+create table if not exists ejemplos (
+  id bigserial primary key,
+  linea text,
+  contexto text,
+  respuesta text,
+  creado timestamptz default now()
+);
+alter table ejemplos enable row level security;
+create table if not exists revisiones (
+  id bigserial primary key,
+  informe text,
+  aprobado text,
+  creado timestamptz default now()
+);
+alter table revisiones enable row level security;

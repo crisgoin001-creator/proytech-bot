@@ -33,6 +33,16 @@ module.exports = {
   guardarWamidConsulta: (id, wamid) => q(() => api.patch('/consultas', { wamid }, { params: { id: `eq.${id}` } })),
   consultaPorWamid: wamid => q(async () => (await api.get('/consultas', { params: { wamid: `eq.${wamid}`, estado: 'eq.abierta', select: 'id' } })).data[0]?.id || null),
   cerrarConsultasDe: tel => q(() => api.patch('/consultas', { estado: 'cerrada' }, { params: { tel: `eq.${tel}`, estado: 'eq.abierta' } })),
+  guardarEjemplo: e => q(() => api.post('/ejemplos', e)),
+  cargarEjemplos: () => q(async () => (await api.get('/ejemplos', { params: { select: 'linea,contexto,respuesta,creado', order: 'id.desc', limit: 80 } })).data, []),
+  mensajesDesde: iso => q(async () => (await api.get('/mensajes', { params: { creado: `gte.${iso}`, select: 'tel,rol,contenido,creado', order: 'id.asc', limit: 500 } })).data, []),
+  leadsTodos: () => q(async () => (await api.get('/leads', { params: { select: 'tel,nombre,linea,etapa,origen,resumen,creado,actualizado', order: 'actualizado.desc', limit: 300 } })).data, []),
+  guardarRevision: informe => q(async () => (await api.post('/revisiones', { informe }, { headers: { Prefer: 'return=representation' } })).data[0]),
+  aprobarUltimaRevision: texto => q(async () => {
+    const ult = (await api.get('/revisiones', { params: { select: 'id', order: 'id.desc', limit: 1 } })).data[0];
+    if (ult) await api.patch('/revisiones', { aprobado: texto }, { params: { id: `eq.${ult.id}` } });
+    return ult?.id || null;
+  }),
   consultasAbiertas: () => q(async () => (await api.get('/consultas', { params: { estado: 'eq.abierta', select: 'id,tel,consulta', order: 'id' } })).data, []),
   cargarDatos: () => q(async () => (await api.get('/datos_confirmados', { params: { select: 'consulta,indicacion,creado', order: 'id.desc', limit: 40 } })).data.reverse(), []),
   guardarDato: d => q(() => api.post('/datos_confirmados', d)),

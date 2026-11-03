@@ -38,6 +38,9 @@ let contadorConsultas = 0;
 const mensajeAConsulta = new Map(); // id del mensaje de WhatsApp enviado a Christian -> nº de consulta
 const datosConfirmados = [];   // lo que Christian ya respondió (se reutiliza)
 const MAX_DATOS = 40;
+const DATOS_DIAS = Number(process.env.DATOS_DIAS || 45);   // un dato confirmado caduca a los N días
+const ejemplos = [];                                        // biblioteca de estilo de Christian
+const MAX_EJEMPLOS = 80;
 
 function sesionNueva(tel) {
   return { tel, historial: [], linea: null, origen: null, nombre: null, resumen: null, pendiente: null, etapa: 'nuevo',
@@ -124,9 +127,15 @@ ESTRATEGIA COMERCIAL (venta consultiva, persuasión ética)
 - Si dice claramente que no le interesa: agradece con cordialidad, deja la puerta abierta y no insistas.
 - Si el cliente pregunta sinceramente si habla con un bot o una persona, no lo niegues: di con naturalidad que es el asistente virtual de ProyTech y que el equipo supervisa la atención, y continúa ayudando.`;
 
+function hoyLima() {
+  return new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+}
+
 function bloqueDatosConfirmados() {
-  if (!datosConfirmados.length) return '(ninguno todavía)';
-  return datosConfirmados.map(d => `- [${d.fecha}] Ante "${d.consulta}" → Christian indicó: "${d.indicacion}"`).join('\n');
+  const limite = Date.now() - DATOS_DIAS * DIA;
+  const vigentes = datosConfirmados.filter(d => !d.ts || d.ts >= limite);
+  if (!vigentes.length) return '(ninguno todavía)';
+  return vigentes.map(d => `- [registrado el ${d.fecha}] Ante "${d.consulta}" → Christian indicó: "${d.indicacion}"`).join('\n');
 }
 
 function saludoSegunHora() {
@@ -138,12 +147,21 @@ function saludoSegunHora() {
 
 function construirPrompt(s) {
   const { hora, saludo } = saludoSegunHora();
+  const hoy = hoyLima();
   return `${ESTILO}
 
 CONOCIMIENTO
 ${CONOCIMIENTO}
 
-DATOS CONFIRMADOS POR CHRISTIAN (son vigentes; úsalos para responder sin volver a consultar)
+FECHA DE HOY (Lima): ${hoy}
+
+EJEMPLOS REALES DE CÓMO RESPONDE CHRISTIAN (imita su tono, longitud y estructura; NO copies precios ni fechas de aquí, esos datos solo valen si están en DATOS CONFIRMADOS y vigentes)
+${bloqueEjemplos(s)}
+
+DATOS CONFIRMADOS POR CHRISTIAN
+Antes de usar un dato, compáralo con la FECHA DE HOY:
+- Si menciona una fecha de inicio, grupo, visita o promoción que YA PASÓ o es de hoy y ya no es posible, NO la ofrezcas: consultar_admin=true para pedir la fecha actualizada.
+- Si el dato no tiene fecha (por ejemplo, un precio), úsalo; si fue registrado hace mucho y el cliente está por cerrar, confírmalo con Christian.
 ${bloqueDatosConfirmados()}
 
 ESTADO DE LA CONVERSACIÓN
@@ -210,6 +228,9 @@ async function redactarConIndicacion(s, consulta, indicacion) {
 CONOCIMIENTO
 ${CONOCIMIENTO}
 
+EJEMPLOS DE ESTILO DE CHRISTIAN
+${bloqueEjemplos(s)}
+
 TAREA: Christian (gerente) te indicó qué responder al cliente. Redacta el siguiente mensaje para el cliente usando EXACTAMENTE los datos que él indicó (montos, fechas, condiciones), con tu estilo profesional y breve, continuando la conversación de forma natural. No digas que consultaste a nadie. Si conviene, cierra con UNA pregunta que avance la venta.
 Pregunta pendiente: "${consulta}"
 Indicación de Christian: "${indicacion}"
@@ -271,10 +292,34 @@ async function consultarAdmin(tel, s, out, textoCliente) {
 async function responderManual(tel, texto, avisar) {
   const s = await obtenerSesion(tel);
   if (s.nueva) await guardarSesion(s);
+  const ctx = ultimoMensajeCliente(s);
   const ok = await enviarYRegistrar(s, texto);
+  if (ok) await registrarEjemplo(s, ctx, texto, 'comando_r');
   if (ok) { s.pausadoHasta = Date.now() + PAUSA_HORAS * HORA; await guardarSesion(s); }
   if (avisar) await enviarWhatsApp(ADMIN_PHONE, ok ? `✅ Enviado a +${tel}. Bot en pausa ${PAUSA_HORAS} h en ese chat (reactiva con /bot ${tel}).` : `⚠️ No se pudo enviar a +${tel}.`);
   return ok;
+}
+
+// ---------- Biblioteca de estilo de Christian ----------
+function ultimoMensajeCliente(s) {
+  for (let i = s.historial.length - 1; i >= 0; i--) if (s.historial[i].role === 'user') return s.historial[i].content;
+  return '';
+}
+async function registrarEjemplo(s, contexto, respuesta, fuente) {
+  if (!respuesta || respuesta.length < 8 || /^\[/.test(respuesta)) return;
+  const e = { linea: s.linea || 'indefinida', contexto: String(contexto || '').slice(0, 400), respuesta: String(respuesta).slice(0, 800) };
+  ejemplos.unshift(e); if (ejemplos.length > MAX_EJEMPLOS) ejemplos.pop();
+  await db.guardarEjemplo(e);
+  console.log(JSON.stringify({ evento: 'ejemplo_estilo', fuente, linea: e.linea }));
+}
+const tokens = t => new Set(String(t).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9ñ]{4,}/g) || []);
+function bloqueEjemplos(s) {
+  if (!ejemplos.length) return '(aún no hay ejemplos)';
+  const q = tokens(ultimoMensajeCliente(s));
+  const elegidos = ejemplos
+    .map((e, i) => { const t = tokens(e.contexto); let n = 0; q.forEach(w => { if (t.has(w)) n++; }); return { e, puntaje: n + (e.linea === s.linea ? 1 : 0) - i * 0.01 }; })
+    .sort((a, b) => b.puntaje - a.puntaje).slice(0, 3).map(x => x.e);
+  return elegidos.map(e => `- Cliente: "${e.contexto}"\n  Christian respondió: "${e.respuesta}"`).join('\n');
 }
 
 // Mensaje enviado por Christian desde la app (coexistencia): se guarda y el bot se pausa en ese chat
@@ -285,6 +330,7 @@ async function registrarEcoManual(eco) {
   if (!tel || !texto) return;
   const s = await obtenerSesion(tel);
   if (s.nueva) await guardarSesion(s);
+  if (eco.text?.body) await registrarEjemplo(s, ultimoMensajeCliente(s), texto, 'app');
   s.historial.push({ role: 'assistant', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
   await db.guardarMensaje(tel, 'assistant', texto);
@@ -334,12 +380,14 @@ async function procesarComandoAdmin(texto) {
   const esOk = /^ok$/i.test(indicacion);
   let final = esOk && p.borrador ? p.borrador : await redactarConIndicacion(s, p.consulta, indicacion);
   if (!final) { await enviarWhatsApp(ADMIN_PHONE, `⚠️ No pude redactar #${id}. Reintenta con otra indicación o escribe: #${id} ok`); return true; }
+  const ctxCliente = ultimoMensajeCliente(s);
   if (await enviarYRegistrar(s, final)) {
+    await registrarEjemplo(s, ctxCliente, final, 'consulta');
     s.pendiente = null; pendientes.delete(id); await db.cerrarConsulta(id);
     s.proximoSeguimiento = Date.now() + SEGUIMIENTO_HORAS * HORA;
     await guardarSesion(s);
     if (!esOk) {
-      const d = { consulta: p.consulta, indicacion, fecha: new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) };
+      const d = { consulta: p.consulta, indicacion, ts: Date.now(), fecha: new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) };
       datosConfirmados.push(d); if (datosConfirmados.length > MAX_DATOS) datosConfirmados.shift();
       await db.guardarDato({ consulta: d.consulta, indicacion: d.indicacion });
     }
@@ -393,6 +441,11 @@ async function procesarMensaje(msg, contacto) {
     }
     if (/^(#\d+\s|\/pendientes|\/datos|\/borrardatos|\/leads|\/r\s|\/bot\s)/i.test(texto)) {
       try { await procesarComandoAdmin(texto); } catch (e) { console.error('Error comando admin:', e.message); }
+      return;
+    }
+    if (/^aprob(ar|ado|o)\b/i.test(texto)) {
+      const idr = await db.aprobarUltimaRevision(texto);
+      await enviarWhatsApp(ADMIN_PHONE, `✅ Anotado${idr ? ' (revisión #' + idr + ')' : ''}: "${texto}". En tu próxima sesión con Claude dile "aplica los ajustes aprobados" y los implementa.`);
       return;
     }
     // Respuesta sin "#id": 1) si citó (respondió) el mensaje de la consulta; 2) si hay una sola consulta abierta
@@ -557,6 +610,33 @@ app.get('/cron/seguimientos', async (req, res) => {
   if (!cronAutorizado(req)) return res.sendStatus(403);
   res.json(await ejecutarSeguimientos());
 });
+async function revisionSemanal() {
+  const desde = new Date(Date.now() - 7 * DIA).toISOString();
+  const [leads, msgs] = await Promise.all([db.leadsTodos(), db.mensajesDesde(desde)]);
+  const semana = leads.filter(l => l.tel !== ADMIN_PHONE && Date.parse(l.actualizado) >= Date.parse(desde));
+  const cuenta = (arr, k) => arr.reduce((o, x) => { const v = x[k] || '-'; o[v] = (o[v] || 0) + 1; return o; }, {});
+  const stats = { leads_semana: semana.length, por_etapa: cuenta(semana, 'etapa'), por_linea: cuenta(semana, 'linea'), por_origen: cuenta(semana, 'origen') };
+  const muestra = msgs.filter(m => m.tel !== ADMIN_PHONE).map(m => `[${m.tel.slice(-4)}] ${m.rol === 'user' ? 'Cliente' : 'ProyTech'}: ${m.contenido}`).join('\n').slice(-12000);
+  const system = `Eres el estratega comercial de ProyTech Automatización (servicios de automatización industrial y cursos de PLC en Lima).
+Analiza la semana y escribe un informe para WhatsApp de máximo 1200 caracteres, en español, sin Markdown (usa "•" para viñetas), con:
+1) Resumen en 2 líneas con cifras.
+2) Objeciones o dudas más repetidas.
+3) Dónde se están perdiendo leads.
+4) Tres ajustes concretos y accionables para la secretaria virtual o para la oferta, numerados, para que Christian los apruebe.
+No inventes datos que no estén en la información.`;
+  const user = `ESTADÍSTICAS: ${JSON.stringify(stats)}\n\nCONVERSACIONES DE LA SEMANA (recortadas):\n${muestra || '(sin conversaciones)'}`;
+  const informe = (await llamarModelo(system, [{ role: 'user', content: user }], 700)).trim();
+  await db.guardarRevision(informe);
+  await enviarWhatsApp(ADMIN_PHONE, `🧠 *Revisión semanal del estratega*\n\n${informe}\n\nResponde con los números de los ajustes que apruebas (por ejemplo "aprobar 1 y 3") y los aplicamos.`);
+  console.log(JSON.stringify({ evento: 'revision_semanal', ...stats }));
+  return stats;
+}
+
+app.get('/cron/semanal', async (req, res) => {
+  if (!cronAutorizado(req)) return res.sendStatus(403);
+  res.json(await revisionSemanal());
+});
+
 app.get('/cron/resumen', async (req, res) => {
   if (!cronAutorizado(req)) return res.sendStatus(403);
   res.json(await enviarResumenDiario());
@@ -600,6 +680,9 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
   const datos = await db.cargarDatos();
-  datos.forEach(d => datosConfirmados.push({ consulta: d.consulta, indicacion: d.indicacion, fecha: new Date(d.creado).toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) }));
+  datos.forEach(d => datosConfirmados.push({ consulta: d.consulta, indicacion: d.indicacion, ts: Date.parse(d.creado), fecha: new Date(d.creado).toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) }));
   if (datos.length) console.log(`Datos confirmados cargados: ${datos.length}`);
+  const ej = await db.cargarEjemplos();
+  ej.forEach(e => ejemplos.push(e));
+  if (ej.length) console.log(`Ejemplos de estilo cargados: ${ej.length}`);
 });
