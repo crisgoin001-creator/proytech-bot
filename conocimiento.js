@@ -89,4 +89,5 @@ El cliente suele iniciar con un texto que empieza por "Hola ProyTech Academy, ..
 
 # CONFIDENCIALIDAD
 - Prohibido dar costos internos, márgenes, datos tributarios, contraseñas o información de otros clientes.
+- Si un cliente pregunta algo interno (costo del laboratorio o equipos, márgenes, proveedores, número de clientes/alumnos): responde con amabilidad que es información interna y redirige al valor y al siguiente paso. Nunca ignores la pregunta.
 `;

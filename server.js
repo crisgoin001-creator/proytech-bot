@@ -174,7 +174,8 @@ ESTADO DE LA CONVERSACIÓN
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
 - Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
 Si la línea no está clara, pregunta amablemente si busca un servicio para su empresa o información del curso.
-Si el mensaje claramente es personal (familia, amigos, temas no comerciales), usa linea "personal" y respuesta "".
+Usa linea "personal" y respuesta "" SOLO si es el primer contacto y claramente es familia o amigos de Christian (saludos personales, temas familiares). Nunca uses "personal" si ya hay una conversación comercial.
+PREGUNTAS CONFIDENCIALES O FUERA DE TEMA de un cliente (cuánto costó el laboratorio o los equipos, márgenes, ganancias, proveedores, sueldos, cuántos alumnos/clientes hay, datos de otros clientes): NO es "personal". Responde con cortesía y naturalidad que es información interna de la empresa, sin incomodar, y redirige en la misma respuesta al valor para el cliente (qué incluye, qué ganará, siguiente paso). Mantén la línea de la conversación (academy o servicios). Ejemplo: "Esa es información interna de la empresa, pero lo que sí le puedo contar es que el laboratorio tiene equipos Siemens reales y practicará con ellos desde la primera clase. ¿Le separo su vacante?"
 
 CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
 - Te piden un dato que NO está en CONOCIMIENTO ni en DATOS CONFIRMADOS (precio total, fechas, descuentos, disponibilidad, cotización, plazos, condiciones especiales).
@@ -646,7 +647,15 @@ async function procesarMensaje(msg, contacto) {
 
   console.log(JSON.stringify({ evento: 'clasificacion', tel, origen: s.origen, linea: out.linea, intencion: out.intencion, confianza: out.confianza, consultar_admin: !!out.consultar_admin }));
 
-  if (out.linea === 'personal') {
+  // "personal" solo aplica a contactos nuevos; un lead con conversación comercial nunca se descarta
+  const leadComercial = ['servicios', 'academy'].includes(s.linea) || (s.historial || []).length > 2;
+  if (out.linea === 'personal' && leadComercial) {
+    console.log(JSON.stringify({ evento: 'personal_ignorado', tel, motivo: 'lead comercial activo' }));
+    out.linea = s.linea || 'indefinida';
+    if (!out.respuesta) {
+      out.respuesta = await redactarConIndicacion(s, ultimoMensajeCliente(s) || 'pregunta del cliente', 'Es una pregunta sobre información interna o fuera de tema. Responde con cortesía que es información interna de la empresa y redirige al valor para el cliente y al siguiente paso. Breve.');
+    }
+  } else if (out.linea === 'personal') {
     console.log(`Chat personal de ${tel}; el bot no responde ni guarda historial.`);
     sesiones.delete(tel); await db.borrarLead(tel);
     return;
