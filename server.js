@@ -860,14 +860,26 @@ const INSTRUCCION_PASO = {
   1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → visitar el laboratorio y ver los equipos Siemens reales; Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
   2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (3–4 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Estructura: 1) pregunta amable si le quedó alguna consulta; 2) ofrece como ayuda (no como oferta comercial) darle más detalles por una llamada de WhatsApp con uno de nuestros ingenieros o que nos visite en el laboratorio; 3) si le interesa, que puede separar su vacante con S/ 200 con la garantía de reembolso si el curso no inicia (Servicios: preparar su cotización o coordinar una visita técnica). Urgencia SOLO si es real (grupo con fecha de inicio, máximo 2 alumnos por estación). Sin pedir número y sin dar nombres. Divide el texto en DOS mensajes separados por "||": el primero con los puntos 1 y 2 (consulta + llamada o visita); el segundo, corto, con el punto 3 (separar con garantía). Deséale buena tarde/noche según la hora.',
 };
+const tieneTemario = s => (s.historial || []).some(m => /\[Documento: (temario|brochure) PDF\]/.test(m.content || ''));
 async function seguimientoLibre(s, paso) {
-  const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${INSTRUCCION_PASO[paso]} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
+  // Academy, paso de 1 h: si aún no recibió el temario, se lo damos como valor nuevo (texto breve + PDF)
+  const darTemario = paso === 1 && s.linea === 'academy' && !tieneTemario(s);
+  const instr = darTemario
+    ? 'Ha pasado aproximadamente una hora sin respuesta. Comparte como valor el temario del curso: una línea de introducción y los 3 módulos con 2 viñetas "• " cada uno (resumidos del CONOCIMIENTO), di que le adjuntas el temario completo en PDF y cierra invitándolo a conocer el laboratorio en Surquillo sin compromiso con una pregunta fácil ("¿Le acomoda pasar esta semana?").'
+    : INSTRUCCION_PASO[paso];
+  const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${instr} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
   const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nFECHA DE HOY (Lima): ' + hoyLima() + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 300)).trim();
   if (!texto) return false;
   // En WhatsApp se lee mejor en burbujas cortas: el modelo separa con "||" y se envían con una pausa breve
   const partes = texto.split('||').map(x => x.trim()).filter(Boolean).slice(0, 2);
   let ok = false;
   for (const [k, parte] of partes.entries()) { if (k) await new Promise(r => setTimeout(r, 4000)); ok = (await enviarYRegistrar(s, parte)) || ok; }
+  if (ok && darTemario) {
+    await new Promise(r => setTimeout(r, 3000));
+    if (await enviarDocumento(s.tel, `${URL_PUBLICA}/archivos/temario-curso-plc-proytech.pdf`, 'Temario Curso PLC Siemens - ProyTech Academy.pdf', 'Temario completo del curso 📄')) {
+      s.historial.push({ role: 'assistant', content: '[Documento: temario PDF]' }); await db.guardarMensaje(s.tel, 'assistant', '[Documento: temario PDF]');
+    }
+  }
   return ok;
 }
 
