@@ -183,9 +183,10 @@ CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
 En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
 
 FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
-{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
+{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
 - Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
-- sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).`;
+- sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).
+- pedir_video=true (solo ACADEMY, una vez por cliente) si ver el laboratorio ayudaría a cerrar: duda de la calidad, los equipos o el lugar; no puede venir a la visita; pide fotos o videos; o está "pensando" tras conocer el precio. En la respuesta al cliente di con naturalidad que en un momento le compartes un video corto del laboratorio. motivo_video = por qué le ayudaría (máx. 1 línea).`;
 }
 
 function extraerJSON(texto) {
@@ -664,6 +665,10 @@ async function procesarMensaje(msg, contacto) {
   if (out.sugerir_llamada && !s.llamadaSugerida) {
     s.llamadaSugerida = true;
     await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\nLlamar: tel:+${tel}`);
+  }
+  if (out.pedir_video && !s.videoPedido) {
+    s.videoPedido = true;
+    await enviarWhatsApp(ADMIN_PHONE, `🎥 *Envía el video del laboratorio* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_video || out.intencion}\nEtapa: ${s.etapa}\nPerfil: ${out.resumen_lead || '-'}\nAbrir chat: https://wa.me/${tel}`);
   }
 
   // Cliente que no quiere: se cierra y se borra el historial (queda solo la ficha mínima)
