@@ -338,7 +338,7 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
-const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
 
 // Revisa el correo de la empresa y convierte compromisos con fecha en plazos del calendario
 async function revisarCorreos(horas = 3) {
@@ -556,6 +556,19 @@ async function procesarComandoAdmin(texto) {
     return true;
   }
   if (/^\/status$/i.test(t)) { await enviarStatus(); return true; }
+  const muc = t.match(/^\/ultimoscupos(\s+enviar)?(?:\s+(.+))?$/i);
+  if (muc) {
+    const fecha = (muc[2] || '14 de noviembre').trim();
+    const leads = (await db.leadsTodos()).filter(l => l.linea === 'academy' && !['ganado', 'perdido'].includes(l.etapa) && l.tel !== ADMIN_PHONE && Date.now() - Date.parse(l.actualizado) < 30 * DIA);
+    if (!muc[1]) {
+      await enviarWhatsApp(ADMIN_PHONE, `📣 *Últimos cupos* — vista previa\nDestinatarios: ${leads.length} leads de Academy (no cerrados, activos en 30 días)\nFecha de inicio: sábado ${fecha}\nCosto aprox.: US$ ${(leads.length * 0.07).toFixed(2)}\n\nPara enviar: */ultimoscupos enviar ${fecha}*`);
+      return true;
+    }
+    let ok = 0;
+    for (const l of leads) { if (await enviarPlantilla(l.tel, 'ultimos_cupos_academy', l.nombre, [fecha])) { ok++; await db.guardarMensaje(l.tel, 'assistant', `[Plantilla ultimos_cupos_academy · ${fecha}]`); } await new Promise(r => setTimeout(r, 1500)); }
+    await enviarWhatsApp(ADMIN_PHONE, `📣 Últimos cupos enviado a ${ok} de ${leads.length} leads.`);
+    return true;
+  }
   if (/^\/saldo$/i.test(t)) { const r = await saldoIA(); await enviarWhatsApp(ADMIN_PHONE, r.ok ? `🔋 Saldo IA (OpenRouter): US$ ${r.saldo.toFixed(2)} · usado en total: US$ ${r.usado.toFixed(2)}${r.saldo < SALDO_MINIMO ? '\n⚠️ Está bajo: recarga en https://openrouter.ai/settings/credits' : ''}` : `No pude consultar el saldo (${r.error}).`); return true; }
   const mco = t.match(/^\/correo(?:\s+(\d{1,3}))?$/i);
   if (mco) {
@@ -808,12 +821,17 @@ function fechaPlantilla(s, i) { // día N tras el último mensaje del cliente, a
 const INSTRUCCION_PASO = {
   0: 'Han pasado unos minutos y el cliente no responde. Escribe UN mensaje muy breve (1–2 líneas) preguntando si pudo revisar la información y si desea algún detalle adicional (Academy: temario, horarios, forma de pago; Servicios: alcance, plazos, referencias). Una sola pregunta, cordial, sin presión.',
   1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → visitar el laboratorio y ver los equipos Siemens reales; Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
-  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (3–4 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Estructura: 1) pregunta amable si le quedó alguna consulta; 2) ofrece como ayuda (no como oferta comercial) darle más detalles por una llamada de WhatsApp con uno de nuestros ingenieros o que nos visite en el laboratorio; 3) si le interesa, que puede separar su vacante con S/ 200 con la garantía de reembolso si el curso no inicia (Servicios: preparar su cotización o coordinar una visita técnica). Urgencia SOLO si es real (grupo con fecha de inicio, máximo 2 alumnos por estación). Sin pedir número y sin dar nombres. Deséale buena tarde/noche según la hora.',
+  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (3–4 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Estructura: 1) pregunta amable si le quedó alguna consulta; 2) ofrece como ayuda (no como oferta comercial) darle más detalles por una llamada de WhatsApp con uno de nuestros ingenieros o que nos visite en el laboratorio; 3) si le interesa, que puede separar su vacante con S/ 200 con la garantía de reembolso si el curso no inicia (Servicios: preparar su cotización o coordinar una visita técnica). Urgencia SOLO si es real (grupo con fecha de inicio, máximo 2 alumnos por estación). Sin pedir número y sin dar nombres. Divide el texto en DOS mensajes separados por "||": el primero con los puntos 1 y 2 (consulta + llamada o visita); el segundo, corto, con el punto 3 (separar con garantía). Deséale buena tarde/noche según la hora.',
 };
 async function seguimientoLibre(s, paso) {
   const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${INSTRUCCION_PASO[paso]} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
-  const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nFECHA DE HOY (Lima): ' + hoyLima() + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 250)).trim();
-  return texto && await enviarYRegistrar(s, texto);
+  const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nFECHA DE HOY (Lima): ' + hoyLima() + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 300)).trim();
+  if (!texto) return false;
+  // En WhatsApp se lee mejor en burbujas cortas: el modelo separa con "||" y se envían con una pausa breve
+  const partes = texto.split('||').map(x => x.trim()).filter(Boolean).slice(0, 2);
+  let ok = false;
+  for (const [k, parte] of partes.entries()) { if (k) await new Promise(r => setTimeout(r, 4000)); ok = (await enviarYRegistrar(s, parte)) || ok; }
+  return ok;
 }
 
 async function procesarEmbudo() {
@@ -976,6 +994,9 @@ const PLANTILLAS = [
   { name: 'recordatorio_cita', category: 'UTILITY', language: 'es', components: [{ type: 'BODY',
     text: 'Hola {{1}}, le recordamos su {{2}} con ProyTech Automatización programada para el {{3}}. Por favor, confírmenos su asistencia respondiendo a este mensaje.',
     example: { body_text: [['Juan', 'visita técnica', 'jueves 6/11 a las 10:00']] } }] },
+  { name: 'ultimos_cupos_academy', category: 'MARKETING', language: 'es', components: [{ type: 'BODY',
+    text: 'Hola {{1}}, quedan pocas vacantes para el curso PLC Siemens que inicia el sábado {{2}} en nuestro laboratorio de Surquillo (máximo 2 alumnos por estación). Puede separar la suya con S/ 200, con la garantía de que si el grupo no se abre se le reembolsa el 100 %. ¿Le reservamos un lugar?',
+    example: { body_text: [['Juan', '14 de noviembre']] } }, { type: 'FOOTER', text: 'Responda NO si no desea más mensajes' }] },
   { name: 'seguimiento_dia3', category: 'UTILITY', language: 'es', components: [{ type: 'BODY',
     text: 'Hola {{1}}, le escribimos de ProyTech Automatización para saber si pudo revisar la información sobre su consulta. Quedamos atentos para resolver cualquier duda.',
     example: { body_text: [['Juan']] } }] },
