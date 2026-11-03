@@ -35,7 +35,10 @@ app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 // ---------- Memoria por número (en RAM; se pierde al reiniciar) ----------
 const SESION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // la sesión se recuerda 7 días (mientras el servidor no reinicie)
 const SEGUIMIENTO_HORAS = Number(process.env.SEGUIMIENTO_HORAS || 20);
-const PRIMER_SEG_MIN = Number(process.env.PRIMER_SEG_MIN || 10); // 1er seguimiento: minutos sin respuesta // < 24 h: dentro de la ventana gratuita de WhatsApp
+const PRIMER_SEG_MIN = Number(process.env.PRIMER_SEG_MIN || 10); // 1er seguimiento: minutos sin respuesta
+const VENTANA_SEG_H = Number(process.env.VENTANA_SEG_H || 20);    // seguimientos libres solo dentro de estas horas
+// Días de las plantillas tras el último mensaje del cliente: Academy decide rápido (grupo con fecha), Servicios B2B más lento
+const DIAS_PLANTILLA = { academy: [2, 5], servicios: [3, 7] }; // < 24 h: dentro de la ventana gratuita de WhatsApp
 const MAX_HISTORIAL = 12;
 const sesiones = new Map();
 const procesados = new Set(); // evita responder dos veces si Meta reintenta
@@ -124,6 +127,9 @@ AGENDA (visitas, reuniones, llamadas, visitas técnicas a planta)
 - Si el cliente insiste, responde con cortesía que aún lo estás verificando, sin repetir la fecha como confirmada.
 - Ofrece "coordinar una visita" como siguiente paso, nunca como algo ya agendado.
 ESTRATEGIA COMERCIAL (venta consultiva, persuasión ética)
+- Cultura peruana: al cliente le da confianza el trato cercano, que le insistan con amabilidad y que lo llamen. Usa su nombre, sé cálida y muestra interés genuino en su caso.
+- LLAMADA PERSONAL: cuando el cliente muestre interés, dudas o diga que lo va a pensar, ofrece UNA vez una llamada breve con el Ing. Christian Gordillo (gerente de ProyTech e instructor del curso): "Si le parece, el Ing. Christian Gordillo puede llamarle 5 minutos para resolver sus dudas y coordinar su visita. ¿A qué hora le acomoda?". Si no conoces su número (TELÉFONO VISIBLE: no), pídele el número al que le pueden llamar.
+- Si el cliente ACEPTA la llamada o da un horario/número: consultar_admin=true y pregunta_admin="📞 Acepta llamada — horario: … — número: …" (pon el número si lo dio). En la respuesta agradece y di que le confirmas la hora en un momento. Nunca confirmes tú la hora.
 - Entiende primero la necesidad (situación → problema → impacto) y conecta el curso/servicio con su objetivo concreto (empleo, ascenso, reducir paradas, seguridad de la planta).
 - Destaca valor real, nunca inventado: práctica en equipos reales, máximo 2 alumnos por estación, certificado, soporte post-curso; en servicios: experiencia en normativas y marcas indicadas.
 - Objeciones: reconoce primero ("Entiendo"), luego responde con valor o una alternativa (pago en partes, separación con S/ 200). Precio: no te disculpes; compara con el beneficio.
@@ -191,7 +197,8 @@ ESTADO DE LA CONVERSACIÓN
 - Hora actual en Lima: ${hora}. Si es el primer mensaje de la conversación (o el cliente saluda de nuevo tras mucho tiempo), empieza con "${saludo}" seguido del nombre del cliente si lo conoces. Nunca uses otro saludo de horario distinto.
 - Origen del contacto: ${s.origen || 'desconocido'}
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
-- Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}`;
+- Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
+- TELÉFONO VISIBLE: ${esTelefono(s.tel) ? 'sí' : 'no (el cliente usa nombre de usuario; si acepta una llamada, pídele su número)'}`;
 }
 
 function extraerJSON(texto) {
@@ -752,7 +759,7 @@ async function procesarMensaje(msg, contacto) {
   }
   if (out.sugerir_llamada && !s.llamadaSugerida) {
     s.llamadaSugerida = true;
-    await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\nLlamar: tel:+${tel}`);
+    await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\n${esTelefono(tel) ? 'Llamar: tel:+' + tel : 'Sin número visible (usa nombre de usuario): el bot le pedirá su número.'}`);
   }
   if (out.pedir_video && !s.videoPedido) {
     s.videoPedido = true;
@@ -793,10 +800,15 @@ function proximaHoraLima(h, m = 0) { // próximo instante en Lima a las h:m (UTC
   if (t <= ahora.getTime()) t += DIA;
   return t;
 }
+function fechaPlantilla(s, i) { // día N tras el último mensaje del cliente, a las 10:00 Lima
+  const dias = (DIAS_PLANTILLA[s.linea] || DIAS_PLANTILLA.servicios)[i];
+  const base = new Date(s.ultimoCliente + dias * DIA - 5 * HORA);
+  return Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate(), 15, 0); // 10:00 Lima = 15:00 UTC
+}
 const INSTRUCCION_PASO = {
   0: 'Han pasado unos minutos y el cliente no responde. Escribe UN mensaje muy breve (1–2 líneas) preguntando si pudo revisar la información y si desea algún detalle adicional (Academy: temario, horarios, forma de pago; Servicios: alcance, plazos, referencias). Una sola pregunta, cordial, sin presión.',
   1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → visitar el laboratorio y ver los equipos Siemens reales; Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
-  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (2–3 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Usa urgencia SOLO si es real y está en CONOCIMIENTO o DATOS CONFIRMADOS (ej. grupo con fecha de inicio, máximo 2 alumnos por estación). Deséale buena noche/tarde según la hora.',
+  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (2–3 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Usa urgencia SOLO si es real y está en CONOCIMIENTO o DATOS CONFIRMADOS (ej. grupo con fecha de inicio, máximo 2 alumnos por estación). Si aún no se le ofreció, ofrece que el Ing. Christian Gordillo le llame 5 minutos para resolver sus dudas (si no hay teléfono visible, pide el número). Deséale buena tarde/noche según la hora.',
 };
 async function seguimientoLibre(s, paso) {
   const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${INSTRUCCION_PASO[paso]} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
@@ -814,14 +826,14 @@ async function procesarEmbudo() {
   for (const s of candidatos) {
     if (s.tel === ADMIN_PHONE && !process.env.SEGUIMIENTO_ADMIN) continue;
     if (s.pausadoHasta && s.pausadoHasta > ahora) continue; // Christian está atendiendo ese chat
-    const finVentana = s.ultimoCliente + 23 * HORA;            // ventana gratuita de WhatsApp (24 h) con margen
+    const finVentana = s.ultimoCliente + VENTANA_SEG_H * HORA; // dentro de la ventana gratuita de WhatsApp (24 h)
     try {
       const paso = s.seguimientos || 0;
       if (paso <= 2) {
-        if (ahora > finVentana) { s.seguimientos = 3; s.proximoSeguimiento = s.ultimoCliente + 3 * DIA; }
+        if (ahora > finVentana) { s.seguimientos = 3; s.proximoSeguimiento = fechaPlantilla(s, 0); }
         else if (h < 8 || h >= 21) { // de noche no se escribe: se pasa a las 8:30 si sigue la ventana
           const manana = proximaHoraLima(8, 30);
-          if (manana < finVentana) s.proximoSeguimiento = manana; else { s.seguimientos = 3; s.proximoSeguimiento = s.ultimoCliente + 3 * DIA; }
+          if (manana < finVentana) s.proximoSeguimiento = manana; else { s.seguimientos = 3; s.proximoSeguimiento = fechaPlantilla(s, 0); }
         } else {
           if (await seguimientoLibre(s, paso)) enviados++;
           s.seguimientos = paso + 1;
@@ -829,16 +841,18 @@ async function procesarEmbudo() {
           else if (paso === 1) {                                                   // fin del día (~19:30) o +3 h
             let t = proximaHoraLima(19, 30); if (t - Date.now() > 12 * HORA || t - Date.now() < 2 * HORA) t = Date.now() + 3 * HORA;
             s.proximoSeguimiento = Math.min(t, finVentana);
-          } else s.proximoSeguimiento = s.ultimoCliente + 3 * DIA;
+          } else s.proximoSeguimiento = fechaPlantilla(s, 0);
         }
       } else if (paso === 3 || paso === 4) {
         if (h < 9 || h >= 20) { s.proximoSeguimiento = proximaHoraLima(9, 30); }
         else {
           const tpl = paso === 3 ? TEMPLATE_D3 : TEMPLATE_D7;
           if (tpl && await enviarPlantilla(s.tel, tpl, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${tpl}]`); }
-          else manuales.push(`${esTelefono(s.tel) ? '+' + s.tel : s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — recordatorio día ${paso === 3 ? 3 : 7}`);
+          else manuales.push(`${esTelefono(s.tel) ? '+' + s.tel : s.tel} ${s.nombre || ''} (${s.linea || '-'}, ${s.etapa}) — recordatorio ${paso === 3 ? '1' : '2 (último)'}`);
+          // Lead que no responde a la plantilla: en Perú una llamada suele destrabarlo
+          if (paso === 3 && esTelefono(s.tel) && ['interesado', 'pensando', 'objecion', 'listo'].includes(s.etapa)) await enviarWhatsApp(ADMIN_PHONE, `📞 *Llama hoy* a +${s.tel}${s.nombre ? ' (' + s.nombre + ')' : ''} · ${s.linea || '-'} · ${s.etapa}\nNo responde desde hace ${Math.round((Date.now() - s.ultimoCliente) / DIA)} días. Perfil: ${s.resumen || '-'}\nLlamar: tel:+${s.tel}`);
           s.seguimientos = paso + 1;
-          s.proximoSeguimiento = paso === 3 ? s.ultimoCliente + 7 * DIA : null;
+          s.proximoSeguimiento = paso === 3 ? fechaPlantilla(s, 1) : null;
         }
       } else s.proximoSeguimiento = null;
       await guardarSesion(s);
