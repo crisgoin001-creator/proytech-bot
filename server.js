@@ -31,6 +31,8 @@ const ETAPAS_ACTIVAS = ['perfilando', 'interesado', 'pensando', 'objecion', 'lis
 
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+app.use('/archivos', express.static(require('path').join(__dirname, 'public'), { maxAge: '1h' }));
+const URL_PUBLICA = process.env.RENDER_EXTERNAL_URL || 'https://proytech-bot.onrender.com';
 
 // ---------- Memoria por número (en RAM; se pierde al reiniciar) ----------
 const SESION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // la sesión se recuerda 7 días (mientras el servidor no reinicie)
@@ -176,7 +178,7 @@ CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
 En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
 
 FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
-{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
+{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"enviar_temario":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
 - Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
 - sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).
 - pedir_video=true (solo ACADEMY, una vez por cliente) si ver el laboratorio ayudaría a cerrar: duda de la calidad, los equipos o el lugar; no puede venir a la visita; pide fotos o videos; o está "pensando" tras conocer el precio. En la respuesta al cliente di con naturalidad que en un momento le compartes un video corto del laboratorio. motivo_video = por qué le ayudaría (máx. 1 línea).
@@ -323,6 +325,16 @@ function formatearParaCliente(t) {
 // ---------- WhatsApp ----------
 const esTelefono = id => /^\d{6,16}$/.test(String(id || ''));
 const destino = id => (esTelefono(id) ? { to: id } : { recipient: id });
+
+async function enviarDocumento(to, link, filename, caption) {
+  try {
+    await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: 'whatsapp', ...destino(to), type: 'document', document: { link, filename, caption } },
+      { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+    console.log(`Documento ${filename} enviado a ${to}`);
+    return true;
+  } catch (e) { console.error(`Error documento a ${to}:`, JSON.stringify(e.response?.data || e.message)); return false; }
+}
 
 async function enviarWhatsApp(to, body) {
   if (!to) { console.error('enviarWhatsApp sin destinatario'); return false; }
@@ -761,6 +773,16 @@ async function procesarMensaje(msg, contacto) {
   }
 
   if (out.respuesta) await enviarYRegistrar(s, out.respuesta);
+
+  // Temario en PDF (una vez por cliente)
+  const yaTieneTemario = (s.historial || []).some(m => /\[Documento: temario PDF\]/.test(m.content || ''));
+  if (out.enviar_temario && (s.linea === 'academy' || out.linea === 'academy') && !yaTieneTemario) {
+    await new Promise(r => setTimeout(r, 3000));
+    if (await enviarDocumento(tel, `${URL_PUBLICA}/archivos/temario-curso-plc-proytech.pdf`, 'Temario Curso PLC Siemens - ProyTech Academy.pdf', 'Le comparto el temario completo del curso 📄')) {
+      s.historial.push({ role: 'assistant', content: '[Documento: temario PDF]' });
+      await db.guardarMensaje(tel, 'assistant', '[Documento: temario PDF]');
+    }
+  }
 
   if (out.etapa) s.etapa = out.etapa;
   if (out.resumen_lead) s.resumen = out.resumen_lead;
