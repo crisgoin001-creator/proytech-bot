@@ -313,10 +313,14 @@ function formatearParaCliente(t) {
 }
 
 // ---------- WhatsApp ----------
+const esTelefono = id => /^\d{6,16}$/.test(String(id || ''));
+const destino = id => (esTelefono(id) ? { to: id } : { recipient: id });
+
 async function enviarWhatsApp(to, body) {
+  if (!to) { console.error('enviarWhatsApp sin destinatario'); return false; }
   try {
     const r = await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'text', text: { body } },
+      { messaging_product: 'whatsapp', ...destino(to), type: 'text', text: { body } },
       { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
     console.log(`Respuesta enviada exitosamente a ${to}: ${JSON.stringify(body)}`);
     return r.data?.messages?.[0]?.id || true;
@@ -487,8 +491,8 @@ function bloqueEjemplos(s) {
 
 // Mensaje enviado por Christian desde la app (coexistencia): se guarda y el bot se pausa en ese chat
 async function registrarEcoManual(eco) {
-  const tel = eco.to;
-  if (tel === ADMIN_PHONE) return; // chat interno con Christian
+  const tel = eco.to || eco.to_user_id;
+  if (!tel || tel === ADMIN_PHONE) return; // chat interno con Christian
   const texto = eco.text?.body || (eco.type ? `[${eco.type} enviado desde la app]` : '');
   if (!tel || !texto) return;
   const s = await obtenerSesion(tel);
@@ -526,7 +530,7 @@ async function procesarComandoAdmin(texto) {
     await enviarWhatsApp(ADMIN_PHONE, datosConfirmados.length ? bloqueDatosConfirmados().slice(0, 3500) : 'Aún no hay datos confirmados.');
     return true;
   }
-  const ma = t.match(/^\/agendar\s+\+?(\d{8,15})\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})(?:\s+(\d{2,3}))?\s*([\s\S]*)$/i);
+  const ma = t.match(/^\/agendar\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})(?:\s+(\d{2,3}))?\s*([\s\S]*)$/i);
   if (ma) {
     const sx = await obtenerSesion(ma[1]); const quien = sx.nombre ? `${sx.nombre} (+${ma[1]})` : `+${ma[1]}`;
     const tit = `${ma[5].trim() || 'Reunión'} – ${quien}`, ini = `${ma[2]}T${ma[3].padStart(5, '0')}`;
@@ -553,9 +557,9 @@ async function procesarComandoAdmin(texto) {
     await enviarWhatsApp(ADMIN_PHONE, l.length ? '🗓️ Libres próximos 7 días:\n' + l.map(x => '• ' + x).join('\n') : (cal.activo ? 'Sin bloques libres o error de calendario.' : 'El calendario aún no está configurado.'));
     return true;
   }
-  const mr = t.match(/^\/r\s+\+?(\d{8,15})\s+([\s\S]+)$/i);
+  const mr = t.match(/^\/r\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)\s+([\s\S]+)$/i);
   if (mr) { await responderManual(mr[1], mr[2].trim(), true); return true; }
-  const mb = t.match(/^\/bot\s+\+?(\d{8,15})$/i);
+  const mb = t.match(/^\/bot\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)$/i);
   if (mb) {
     const sx = await obtenerSesion(mb[1]); sx.pausadoHasta = null; await guardarSesion(sx);
     await enviarWhatsApp(ADMIN_PHONE, `🤖 Bot reactivado para +${mb[1]}.`); return true;
@@ -603,8 +607,10 @@ async function procesarMensaje(msg, contacto) {
   procesados.add(msg.id);
   if (procesados.size > 2000) procesados.delete(procesados.values().next().value);
 
-  const tel = msg.from;
+  const tel = msg.from || msg.from_user_id; // sin teléfono si el cliente usa nombre de usuario (BSUID)
+  if (!tel) { console.error('Mensaje sin remitente:', JSON.stringify(msg).slice(0, 300)); return; }
   const s = await obtenerSesion(tel);
+  if (!s.nombre && contacto?.profile?.username) s.nombre = contacto.profile.username;
   if (!s.nombre && contacto?.profile?.name) s.nombre = contacto.profile.name;
 
   // Mensajes que no son texto (audio, imagen, documento...)
@@ -755,7 +761,7 @@ async function procesarMensaje(msg, contacto) {
 async function enviarPlantilla(tel, nombrePlantilla, nombreCliente, extras = []) {
   try {
     await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, {
-      messaging_product: 'whatsapp', to: tel, type: 'template',
+      messaging_product: 'whatsapp', ...destino(tel), type: 'template',
       template: { name: nombrePlantilla, language: { code: TEMPLATE_LANG },
         components: [{ type: 'body', parameters: [{ type: 'text', text: (nombreCliente || '').split(' ')[0] || 'estimado(a)' }, ...extras.map(x => ({ type: 'text', text: String(x) }))] }] }
     }, { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
@@ -888,7 +894,7 @@ app.post('/webhook', (req, res) => {
       if (change.field && change.field !== 'messages') continue; // history / smb_app_state_sync: se ignoran
       const contactos = value.contacts || [];
       for (const msg of value.messages || []) {
-        const contacto = contactos.find(c => c.wa_id === msg.from) || contactos[0];
+        const contacto = contactos.find(c => (msg.from && c.wa_id === msg.from) || (msg.from_user_id && c.user_id === msg.from_user_id)) || contactos[0];
         procesarMensaje(msg, contacto).catch(e => console.error('Error procesando mensaje:', e));
       }
     }
