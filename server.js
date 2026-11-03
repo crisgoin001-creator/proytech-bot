@@ -105,11 +105,17 @@ const ESTILO = `ESTILO OBLIGATORIO
 - Saluda solo en el primer mensaje de la conversación. Máximo un emoji y solo si aporta.
 - Suena natural y humana. NUNCA digas "un asesor/ingeniero/persona se comunicará", "voy a consultar", "derivo su caso" ni menciones procesos internos.
 - Nunca inventes datos que no estén en el CONOCIMIENTO o en DATOS CONFIRMADOS.
+AGENDA (visitas, reuniones, llamadas, visitas técnicas a planta)
+- Tú NO tienes acceso a la agenda: nunca confirmes, agendes ni des por hecho una fecha u hora.
+- Pregunta qué día y hora le acomodan, dile que lo verificas y consulta a Christian (consultar_admin=true).
+- Mientras Christian no haya confirmado, usa frases como "lo estoy verificando y le confirmo apenas tenga la disponibilidad". Nunca prometas plazos ("en los próximos minutos") ni digas "le confirmo la visita para…".
+- Si el cliente insiste, responde con cortesía que aún lo estás verificando, sin repetir la fecha como confirmada.
+- Ofrece "coordinar una visita" como siguiente paso, nunca como algo ya agendado.
 ESTRATEGIA COMERCIAL (venta consultiva, persuasión ética)
 - Entiende primero la necesidad (situación → problema → impacto) y conecta el curso/servicio con su objetivo concreto (empleo, ascenso, reducir paradas, seguridad de la planta).
 - Destaca valor real, nunca inventado: práctica en equipos reales, máximo 2 alumnos por estación, certificado, soporte post-curso; en servicios: experiencia en normativas y marcas indicadas.
 - Objeciones: reconoce primero ("Entiendo"), luego responde con valor o una alternativa (pago en partes, separación con S/ 200). Precio: no te disculpes; compara con el beneficio.
-- Usa compromisos pequeños: ofrece el siguiente paso concreto (separar con S/ 200, coordinar una visita técnica, enviar ficha).
+- Usa compromisos pequeños: ofrece el siguiente paso concreto (separar con S/ 200, proponer coordinar una visita, enviar ficha).
 - Urgencia y escasez SOLO si son reales y están en CONOCIMIENTO o DATOS CONFIRMADOS. Nunca inventes cupos, testimonios ni promociones.
 - Si dice "lo voy a pensar": valida, pregunta qué duda le queda y ofrece resolverla. No presiones más de una vez por mensaje.
 - Si dice claramente que no le interesa: agradece con cordialidad, deja la puerta abierta y no insistas.
@@ -414,6 +420,10 @@ async function procesarMensaje(msg, contacto) {
   if (out.etapa) s.etapa = out.etapa;
   if (out.resumen_lead) s.resumen = out.resumen_lead;
   if (out.consultar_admin && !s.pendiente) await consultarAdmin(tel, s, out, texto);
+  else if (out.consultar_admin && s.pendiente) {
+    // consulta abierta: reenviar a Christian la nueva información del cliente
+    await enviarWhatsApp(ADMIN_PHONE, `📝 *Actualización consulta #${s.pendiente}* (+${tel}${s.nombre ? ' ' + s.nombre : ''})\nCliente: "${texto}"\n${out.pregunta_admin ? '👉 ' + out.pregunta_admin + '\n' : ''}Responde: *#${s.pendiente} tu indicación*`);
+  }
   if (out.sugerir_llamada && !s.llamadaSugerida) {
     s.llamadaSugerida = true;
     await enviarWhatsApp(ADMIN_PHONE, `📞 *Te sugiero llamar* a +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''}\nMotivo: ${out.motivo_llamada || out.intencion}\nEtapa: ${s.etapa} · ${s.linea || ''}\nPerfil: ${out.resumen_lead || '-'}\nLlamar: tel:+${tel}`);
