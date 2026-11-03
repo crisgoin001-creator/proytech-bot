@@ -16,6 +16,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'proytech_secure_verify_token';
 const APP_SECRET = process.env.APP_SECRET || '';            // opcional: valida firma de Meta
 const ADMIN_PHONE = process.env.ADMIN_PHONE || '51993186475'; // recibe alertas de derivación
 const MODEL = process.env.MODEL || 'anthropic/claude-haiku-4.5';
+const MODELOS_GRATIS = (process.env.MODELOS_GRATIS || 'google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free').split(',').map(x => x.trim()).filter(Boolean);
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_VERSION || 'v25.0'}`;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const TEMPLATE_D3 = process.env.TEMPLATE_D3 || 'seguimiento_dia3';   // plantilla para recordatorio día 3
@@ -157,6 +158,23 @@ function construirPrompt(s) {
 CONOCIMIENTO
 ${CONOCIMIENTO}
 
+Si la línea no está clara, pregunta amablemente si busca un servicio para su empresa o información del curso.
+Usa linea "personal" y respuesta "" SOLO si es el primer contacto y claramente es familia o amigos de Christian (saludos personales, temas familiares). Nunca uses "personal" si ya hay una conversación comercial.
+PREGUNTAS CONFIDENCIALES O FUERA DE TEMA de un cliente (cuánto costó el laboratorio o los equipos, márgenes, ganancias, proveedores, sueldos, cuántos alumnos/clientes hay, datos de otros clientes): NO es "personal". Responde con cortesía y naturalidad que es información interna de la empresa, sin incomodar, y redirige en la misma respuesta al valor para el cliente (qué incluye, qué ganará, siguiente paso). Mantén la línea de la conversación (academy o servicios). Ejemplo: "Esa es información interna de la empresa, pero lo que sí le puedo contar es que el laboratorio tiene equipos Siemens reales y practicará con ellos desde la primera clase. ¿Le separo su vacante?"
+
+CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
+- Te piden un dato que NO está en CONOCIMIENTO ni en DATOS CONFIRMADOS (precio total, fechas, descuentos, disponibilidad, cotización, plazos, condiciones especiales).
+- El lead está listo para cerrar: quiere reservar/pagar, o en Servicios ya tienes rubro + necesidad.
+- Queja, reclamo, urgencia de planta parada, o pide llamada/visita.
+En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
+
+FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
+{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
+- Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
+- sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).
+- pedir_video=true (solo ACADEMY, una vez por cliente) si ver el laboratorio ayudaría a cerrar: duda de la calidad, los equipos o el lugar; no puede venir a la visita; pide fotos o videos; o está "pensando" tras conocer el precio. En la respuesta al cliente di con naturalidad que en un momento le compartes un video corto del laboratorio. motivo_video = por qué le ayudaría (máx. 1 línea).
+
+<<DINAMICO>>
 FECHA DE HOY (Lima): ${hoy}
 
 EJEMPLOS REALES DE CÓMO RESPONDE CHRISTIAN (imita su tono, longitud y estructura; NO copies precios ni fechas de aquí, esos datos solo valen si están en DATOS CONFIRMADOS y vigentes)
@@ -172,22 +190,7 @@ ESTADO DE LA CONVERSACIÓN
 - Hora actual en Lima: ${hora}. Si es el primer mensaje de la conversación (o el cliente saluda de nuevo tras mucho tiempo), empieza con "${saludo}" seguido del nombre del cliente si lo conoces. Nunca uses otro saludo de horario distinto.
 - Origen del contacto: ${s.origen || 'desconocido'}
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
-- Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
-Si la línea no está clara, pregunta amablemente si busca un servicio para su empresa o información del curso.
-Usa linea "personal" y respuesta "" SOLO si es el primer contacto y claramente es familia o amigos de Christian (saludos personales, temas familiares). Nunca uses "personal" si ya hay una conversación comercial.
-PREGUNTAS CONFIDENCIALES O FUERA DE TEMA de un cliente (cuánto costó el laboratorio o los equipos, márgenes, ganancias, proveedores, sueldos, cuántos alumnos/clientes hay, datos de otros clientes): NO es "personal". Responde con cortesía y naturalidad que es información interna de la empresa, sin incomodar, y redirige en la misma respuesta al valor para el cliente (qué incluye, qué ganará, siguiente paso). Mantén la línea de la conversación (academy o servicios). Ejemplo: "Esa es información interna de la empresa, pero lo que sí le puedo contar es que el laboratorio tiene equipos Siemens reales y practicará con ellos desde la primera clase. ¿Le separo su vacante?"
-
-CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
-- Te piden un dato que NO está en CONOCIMIENTO ni en DATOS CONFIRMADOS (precio total, fechas, descuentos, disponibilidad, cotización, plazos, condiciones especiales).
-- El lead está listo para cerrar: quiere reservar/pagar, o en Servicios ya tienes rubro + necesidad.
-- Queja, reclamo, urgencia de planta parada, o pide llamada/visita.
-En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
-
-FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
-{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
-- Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
-- sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).
-- pedir_video=true (solo ACADEMY, una vez por cliente) si ver el laboratorio ayudaría a cerrar: duda de la calidad, los equipos o el lugar; no puede venir a la visita; pide fotos o videos; o está "pensando" tras conocer el precio. En la respuesta al cliente di con naturalidad que en un momento le compartes un video corto del laboratorio. motivo_video = por qué le ayudaría (máx. 1 línea).`;
+- Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}`;
 }
 
 function extraerJSON(texto) {
@@ -199,11 +202,19 @@ function extraerJSON(texto) {
 
 // ---------- Claude vía OpenRouter ----------
 let avisoSaldo = 0;
-async function llamarModelo(system, mensajes, maxTokens = 500, intento = 1) {
+// opts.interna=true → primero modelos gratis (correo, revisión semanal); clientes → Haiku y, si falla, respaldo gratis
+async function llamarModelo(system, mensajes, maxTokens = 500, intento = 1, opts = {}) {
+  if (opts.interna && intento === 1) {
+    try { const t = await llamarModeloUnaVez(system, mensajes, maxTokens, MODELOS_GRATIS); if (t) return t; } catch (e) { console.error('Modelo gratis falló, uso Haiku:', e.response?.status || e.message); }
+  }
   try { return await llamarModeloUnaVez(system, mensajes, maxTokens); }
   catch (e) {
     const st = e.response?.status;
-    if ((st === 402 || st === 429 || st >= 500) && intento < 3) { await new Promise(r => setTimeout(r, 6000 * intento)); return llamarModelo(system, mensajes, maxTokens, intento + 1); }
+    if ((st === 402 || st === 429 || st >= 500) && intento < 3) { await new Promise(r => setTimeout(r, 6000 * intento)); return llamarModelo(system, mensajes, maxTokens, intento + 1, opts); }
+    if (!opts.sinRespaldo && MODELOS_GRATIS.length) {
+      try { const t = await llamarModeloUnaVez(system, mensajes, maxTokens, MODELOS_GRATIS); if (t) { console.log(JSON.stringify({ evento: 'respaldo_gratis', motivo: st || e.message })); return t; } }
+      catch (e2) { console.error('Respaldo gratis también falló:', e2.response?.status || e2.message); }
+    }
     if (st === 402 && Date.now() - avisoSaldo > 6 * HORA) {
       avisoSaldo = Date.now();
       enviarWhatsApp(ADMIN_PHONE, '⚠️ *Saldo de IA agotado* (OpenRouter). El bot no puede redactar respuestas hasta recargar créditos en https://openrouter.ai/settings/credits').catch(() => {});
@@ -211,12 +222,20 @@ async function llamarModelo(system, mensajes, maxTokens = 500, intento = 1) {
     throw e;
   }
 }
-async function llamarModeloUnaVez(system, mensajes, maxTokens) {
+async function llamarModeloUnaVez(system, mensajes, maxTokens, modelos = null) {
+  const gratis = Array.isArray(modelos);
+  let sys = system.replace('<<DINAMICO>>\n', '');
+  // Caché de prompt (Anthropic): la parte estática (estilo + conocimiento + reglas) se cobra ~10 % al repetirse
+  if (!gratis && system.includes('<<DINAMICO>>')) {
+    const [fijo, variable] = system.split('<<DINAMICO>>');
+    sys = [{ type: 'text', text: fijo, cache_control: { type: 'ephemeral' } }, { type: 'text', text: variable }];
+  }
   const r = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-    model: MODEL,
+    ...(gratis ? { models: modelos } : { model: MODEL }),
     max_tokens: maxTokens,
     temperature: 0.3,
-    messages: [{ role: 'system', content: system }, ...mensajes]
+    usage: { include: true },
+    messages: [{ role: 'system', content: sys }, ...mensajes]
   }, {
     timeout: 25000,
     headers: {
@@ -226,6 +245,8 @@ async function llamarModeloUnaVez(system, mensajes, maxTokens) {
       'X-Title': 'ProyTech WhatsApp Agent'
     }
   });
+  const u = r.data.usage || {};
+  console.log(JSON.stringify({ evento: 'uso_ia', modelo: r.data.model, entrada: u.prompt_tokens, cache: u.prompt_tokens_details?.cached_tokens || 0, salida: u.completion_tokens, costo_usd: u.cost ?? null }));
   return r.data.choices?.[0]?.message?.content || '';
 }
 
@@ -301,7 +322,7 @@ async function revisarCorreos(horas = 3) {
     const system = `Hoy es ${hoyLima()} (Lima). Eres el asistente del gerente de ProyTech Automatización (ingeniería y automatización industrial, Lima). Lee el correo y extrae SOLO plazos o compromisos con fecha concreta que el gerente debe cumplir o recordar: entregar cotización/propuesta, enviar documentos o consultas, visitas, reuniones, pagos, vencimientos tributarios, fechas de adjudicación. Ignora publicidad y fechas pasadas. Convierte fechas relativas ("el viernes", "mañana") en fechas reales a partir de la fecha del correo. Devuelve SOLO JSON: {"plazos":[{"fecha":"YYYY-MM-DD","accion":"verbo + qué + cliente, máx 80 caracteres","linea":"servicios|academy"}]}. Si no hay, {"plazos":[]}.`;
     const user = `${enviado ? 'CORREO ENVIADO por el gerente' : 'CORREO RECIBIDO'}\nFecha: ${m.fecha?.toISOString?.() || ''}\nDe: ${m.de}\nPara: ${m.para}\nAsunto: ${m.asunto}\n\n${m.texto}`;
     let r = null;
-    try { r = extraerJSON('{' + await llamarModelo(system, [{ role: 'user', content: user }, { role: 'assistant', content: '{' }], 400)); } catch (e) { console.error('Plazos LLM:', e.message); continue; }
+    try { r = extraerJSON('{' + await llamarModelo(system, [{ role: 'user', content: user }, { role: 'assistant', content: '{' }], 400, 1, { interna: true })); } catch (e) { console.error('Plazos LLM:', e.message); continue; }
     const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Lima' });
     const validos = (r?.plazos || []).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x.fecha || '') && x.fecha >= hoy && x.accion);
     for (const x of validos) {
@@ -361,8 +382,8 @@ async function ejecutarRecordatorios() {
     const cuando = cal.fmt(new Date(c.inicio));
     const que = (c.titulo || 'reunión').split(' – ')[0].toLowerCase();
     const texto = tipo === 'recordado_24'
-      ? `${saludoSegunHora()}${s.nombre ? ' ' + s.nombre.split(' ')[0] : ''}, le recordamos su ${que} con ProyTech programada para el ${cuando}. ¿Nos confirma su disponibilidad?`
-      : `${saludoSegunHora()}, le recordamos que su ${que} con ProyTech es hoy a las ${cuando.slice(-5)}. Cualquier novedad, nos avisa por aquí.`;
+      ? `${saludoSegunHora().saludo}${s.nombre ? ' ' + s.nombre.split(' ')[0] : ''}, le recordamos su ${que} con ProyTech programada para el ${cuando}. ¿Nos confirma su disponibilidad?`
+      : `${saludoSegunHora().saludo}, le recordamos que su ${que} con ProyTech es hoy a las ${cuando.slice(-5)}. Cualquier novedad, nos avisa por aquí.`;
     let ok = false;
     if ((Date.now() - s.ultimoCliente) / HORA < 23.5) ok = await enviarYRegistrar(s, texto);
     else ok = await enviarPlantilla(c.tel, TEMPLATE_RECORDATORIO, s.nombre, [que, cuando]);
@@ -655,7 +676,7 @@ async function procesarMensaje(msg, contacto) {
     // El cliente no se queda sin respuesta: acuse breve y Christian decide el resto
     if (!s.acuseIA || Date.now() - s.acuseIA > HORA) {
       s.acuseIA = Date.now();
-      await enviarYRegistrar(s, `${(s.historial || []).length <= 1 ? saludoSegunHora() + '. ' : ''}Gracias por escribirnos. Permítame un momento y le respondo.`);
+      await enviarYRegistrar(s, `${(s.historial || []).length <= 1 ? saludoSegunHora().saludo + '. ' : ''}Gracias por escribirnos. Permítame un momento y le respondo.`);
     }
     await consultarAdmin(tel, s, { linea: s.linea, intencion: 'error_ia', pregunta_admin: sinSaldo ? 'Sin saldo de IA (OpenRouter). Recarga créditos o dime qué le respondo.' : 'La IA falló; ¿qué le respondo?' }, texto);
     return;
@@ -802,7 +823,7 @@ Analiza la semana y escribe un informe para WhatsApp de máximo 1200 caracteres,
 4) Tres ajustes concretos y accionables para la secretaria virtual o para la oferta, numerados, para que Christian los apruebe.
 No inventes datos que no estén en la información.`;
   const user = `ESTADÍSTICAS: ${JSON.stringify(stats)}\n\nCONVERSACIONES DE LA SEMANA (recortadas):\n${muestra || '(sin conversaciones)'}`;
-  const informe = (await llamarModelo(system, [{ role: 'user', content: user }], 700)).trim();
+  const informe = (await llamarModelo(system, [{ role: 'user', content: user }], 700, 1, { interna: true })).trim();
   await db.guardarRevision(informe);
   await enviarWhatsApp(ADMIN_PHONE, `🧠 *Revisión semanal del estratega*\n\n${informe}\n\nResponde con los números de los ajustes que apruebas (por ejemplo "aprobar 1 y 3") y los aplicamos.`);
   console.log(JSON.stringify({ evento: 'revision_semanal', ...stats }));
