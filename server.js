@@ -5,6 +5,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const CONOCIMIENTO = require('./conocimiento');
 const db = require('./db');
+const cal = require('./calendario');
 
 // ---------- Configuración (variables de entorno en Render) ----------
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -269,6 +270,26 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
+const RX_AGENDA = /visita|reuni[oó]n|llamada|agend|cita|horario|disponib|coordinar|zoom|meet/i;
+
+// Tras la confirmación de Christian: extrae fecha/hora y crea el evento en su Google Calendar
+async function intentarAgendar(s, consulta, indicacion, respuestaCliente) {
+  if (!cal.activo) return;
+  const system = `Hoy es ${hoyLima()} (Lima). Analiza la indicación que el dueño de ProyTech dio sobre una solicitud de agenda de un cliente. Devuelve SOLO JSON: {"agendar":true|false,"inicio":"YYYY-MM-DDTHH:MM","duracion_min":60,"tipo":"Visita técnica|Reunión|Llamada|Clase|Otro","lugar":""}. agendar=true solo si el dueño CONFIRMA una fecha y hora concretas (no si pide preguntar, propone opciones o rechaza). Interpreta "sábado 14" o "jueves 10am" como la próxima fecha futura.`;
+  const user = `Solicitud: ${consulta}\nIndicación del dueño: ${indicacion}\nRespuesta enviada al cliente: ${respuestaCliente}`;
+  let d;
+  try { d = extraerJSON('{' + await llamarModelo(system, [{ role: 'user', content: user }, { role: 'assistant', content: '{' }], 150)); } catch (e) { return; }
+  if (!d?.agendar || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(d.inicio || '')) return;
+  const quien = s.nombre ? `${s.nombre} (+${s.tel})` : `+${s.tel}`;
+  const ev = await cal.crearEvento({
+    linea: s.linea, titulo: `${d.tipo || 'Reunión'} – ${quien}`, inicio: d.inicio, duracionMin: Number(d.duracion_min) || 60, lugar: d.lugar || '',
+    descripcion: `Línea: ${s.linea || '-'}\nWhatsApp: https://wa.me/${s.tel}\nPerfil: ${s.resumen || '-'}\nSolicitud: ${consulta}\nIndicación: ${indicacion}`,
+  });
+  const nombreCal = s.linea === 'academy' ? 'ProyTech Academy' : 'ProyTech Automatización';
+  await enviarWhatsApp(ADMIN_PHONE, ev ? `📅 Agendado en *${nombreCal}*: ${d.tipo || 'Reunión'} ${d.inicio.replace('T', ' ')} con ${quien}.\nSi no corresponde, bórralo en tu Google Calendar.`
+    : `⚠️ No pude crear el evento en el calendario (${d.inicio}). Revisa los logs o usa /agendar.`);
+}
+
 async function consultarAdmin(tel, s, out, textoCliente) {
   const consulta = out.pregunta_admin || out.intencion;
   const fila = await db.crearConsulta({ tel, consulta, borrador: out.borrador || '' });
@@ -282,6 +303,7 @@ async function consultarAdmin(tel, s, out, textoCliente) {
     (out.resumen_lead ? `Perfil: ${out.resumen_lead}\n` : '') +
     `👉 ${consulta}\n` +
     (out.borrador ? `\nBorrador:\n"${out.borrador}"\n` : '') +
+    (cal.activo && RX_AGENDA.test(consulta + ' ' + textoCliente) ? await cal.libres(7).then(l => l.length ? `\n🗓️ Libres en tu calendario: ${l.join(' · ')}\n` : '') : '') +
     `\nResponde:  *#${id} tu indicación*` + (out.borrador ? `   o   *#${id} ok*` : '');
   const wamid = await enviarWhatsApp(ADMIN_PHONE, msg);
   if (typeof wamid === 'string') { mensajeAConsulta.set(wamid, id); await db.guardarWamidConsulta(id, wamid); }
@@ -363,6 +385,18 @@ async function procesarComandoAdmin(texto) {
     await enviarWhatsApp(ADMIN_PHONE, datosConfirmados.length ? bloqueDatosConfirmados().slice(0, 3500) : 'Aún no hay datos confirmados.');
     return true;
   }
+  const ma = t.match(/^\/agendar\s+\+?(\d{8,15})\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})(?:\s+(\d{2,3}))?\s*([\s\S]*)$/i);
+  if (ma) {
+    const sx = await obtenerSesion(ma[1]); const quien = sx.nombre ? `${sx.nombre} (+${ma[1]})` : `+${ma[1]}`;
+    const ev = await cal.crearEvento({ linea: sx.linea, titulo: `${ma[5].trim() || 'Reunión'} – ${quien}`, inicio: `${ma[2]}T${ma[3].padStart(5, '0')}`, duracionMin: Number(ma[4]) || 60, descripcion: `WhatsApp: https://wa.me/${ma[1]}\nPerfil: ${sx.resumen || '-'}` });
+    await enviarWhatsApp(ADMIN_PHONE, ev ? `📅 Evento creado: ${ma[2]} ${ma[3]} con ${quien}.` : (cal.activo ? '⚠️ No pude crear el evento. Revisa los logs.' : '⚠️ El calendario aún no está configurado.'));
+    return true;
+  }
+  if (/^\/libres$/i.test(t)) {
+    const l = await cal.libres(7, 60, 10);
+    await enviarWhatsApp(ADMIN_PHONE, l.length ? '🗓️ Libres próximos 7 días:\n' + l.map(x => '• ' + x).join('\n') : (cal.activo ? 'Sin bloques libres o error de calendario.' : 'El calendario aún no está configurado.'));
+    return true;
+  }
   const mr = t.match(/^\/r\s+\+?(\d{8,15})\s+([\s\S]+)$/i);
   if (mr) { await responderManual(mr[1], mr[2].trim(), true); return true; }
   const mb = t.match(/^\/bot\s+\+?(\d{8,15})$/i);
@@ -392,6 +426,7 @@ async function procesarComandoAdmin(texto) {
       await db.guardarDato({ consulta: d.consulta, indicacion: d.indicacion });
     }
     await enviarWhatsApp(ADMIN_PHONE, `✅ #${id} enviado a +${p.tel}:\n"${final}"`);
+    if (!esOk && RX_AGENDA.test(p.consulta + ' ' + indicacion)) await intentarAgendar(s, p.consulta, indicacion, final);
   } else {
     await enviarWhatsApp(ADMIN_PHONE, `⚠️ No se pudo enviar #${id} a +${p.tel}. Revisa los logs.`);
   }
