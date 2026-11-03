@@ -67,7 +67,8 @@ async function guardarSesion(s) {
   await db.guardarLead(s);
 }
 
-async function enviarYRegistrar(s, texto) {
+async function enviarYRegistrar(s, textoOriginal) {
+  const texto = formatearParaCliente(textoOriginal);
   const ok = await enviarWhatsApp(s.tel, texto);
   if (ok) {
     s.historial.push({ role: 'assistant', content: texto });
@@ -102,6 +103,7 @@ const ESTILO = `ESTILO OBLIGATORIO
 - Escribes como la asistente comercial de ProyTech Automatización: profesional, cordial y directa. Trato de "usted" salvo que el cliente tutee.
 - Máximo 3 o 4 líneas. Nada de párrafos largos, listas extensas ni relleno.
 - UNA sola pregunta de perfilamiento por mensaje.
+- FORMATO WHATSAPP: no uses asteriscos, negritas, almohadillas ni Markdown. Si enumeras 2 a 4 puntos, usa viñetas "• " (una por línea, frases cortas). Para todo lo demás, texto corrido.
 - Saluda solo en el primer mensaje de la conversación. Máximo un emoji y solo si aporta.
 - Suena natural y humana. NUNCA digas "un asesor/ingeniero/persona se comunicará", "voy a consultar", "derivo su caso" ni menciones procesos internos.
 - Nunca inventes datos que no estén en el CONOCIMIENTO o en DATOS CONFIRMADOS.
@@ -216,6 +218,19 @@ Devuelve SOLO el texto del mensaje, sin comillas ni explicaciones.`;
   let texto = (await llamarModelo(system, mensajes, 400)).trim().replace(/^"|"$/g, '');
   if (!texto) texto = (await llamarModelo(system, mensajes, 400)).trim().replace(/^"|"$/g, '');
   return texto;
+}
+
+// Limpia Markdown para que el cliente vea un texto profesional en WhatsApp
+function formatearParaCliente(t) {
+  return String(t || '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')          // **negrita** -> texto
+    .replace(/(^|\s)\*(\S[^*\n]*?\S|\S)\*(?=\s|[.,;:!?)]|$)/g, '$1$2') // *negrita* -> texto
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s*/gm, '')          // # títulos
+    .replace(/^\s*[-*+]\s+/gm, '• ')             // - lista -> •
+    .replace(/^\s*\d+[.)]\s+(?=\S)/gm, m => m) // listas numeradas se mantienen
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 // ---------- WhatsApp ----------
