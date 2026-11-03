@@ -51,6 +51,8 @@ module.exports = {
     select: '*', proximo_seguimiento: `lte.${new Date().toISOString()}`, etapa: 'in.(perfilando,interesado,pensando,objecion,listo)', pendiente: 'is.null'
   } })).data, []),
   listarChats: () => q(async () => (await api.get('/leads', { params: { select: 'tel,nombre,linea,etapa,origen,resumen,actualizado,pausado_hasta,pendiente', order: 'actualizado.desc', limit: 100 } })).data, []),
+  plazoProcesado: id => q(async () => (await api.get('/correos_vistos', { params: { message_id: `eq.${id}`, select: 'message_id' } })).data.length > 0, false),
+  marcarCorreo: (id, resumen) => q(() => api.post('/correos_vistos', { message_id: id, resumen }, { headers: { Prefer: 'resolution=ignore-duplicates' } })),
   guardarCita: c => q(() => api.post('/citas', c)),
   citasProximas: horas => q(async () => (await api.get('/citas', { params: { select: '*', inicio: `gte.${new Date().toISOString()}`, order: 'inicio', limit: 50 } })).data
     .filter(c => Date.parse(c.inicio) - Date.now() <= horas * 36e5), []),

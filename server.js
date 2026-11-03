@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const CONOCIMIENTO = require('./conocimiento');
 const db = require('./db');
 const cal = require('./calendario');
+const correo = require('./correo');
 
 // ---------- Configuración (variables de entorno en Render) ----------
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -270,7 +271,39 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
-const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /agenda [días] — eventos agendados\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+
+// Revisa el correo de la empresa y convierte compromisos con fecha en plazos del calendario
+async function revisarCorreos(horas = 3) {
+  if (!correo.activo || !cal.activo || !db.activo) return { revisados: 0, plazos: 0 };
+  const lista = await correo.correosDesde(new Date(Date.now() - horas * HORA));
+  let plazos = 0; const avisos = [];
+  for (const m of lista) {
+    if (await db.plazoProcesado(m.id)) continue;
+    const enviado = /sent|enviad/i.test(m.buzon);
+    const system = `Hoy es ${hoyLima()} (Lima). Eres el asistente del gerente de ProyTech Automatización (ingeniería y automatización industrial, Lima). Lee el correo y extrae SOLO plazos o compromisos con fecha concreta que el gerente debe cumplir o recordar: entregar cotización/propuesta, enviar documentos o consultas, visitas, reuniones, pagos, vencimientos tributarios, fechas de adjudicación. Ignora publicidad y fechas pasadas. Convierte fechas relativas ("el viernes", "mañana") en fechas reales a partir de la fecha del correo. Devuelve SOLO JSON: {"plazos":[{"fecha":"YYYY-MM-DD","accion":"verbo + qué + cliente, máx 80 caracteres","linea":"servicios|academy"}]}. Si no hay, {"plazos":[]}.`;
+    const user = `${enviado ? 'CORREO ENVIADO por el gerente' : 'CORREO RECIBIDO'}\nFecha: ${m.fecha?.toISOString?.() || ''}\nDe: ${m.de}\nPara: ${m.para}\nAsunto: ${m.asunto}\n\n${m.texto}`;
+    let r = null;
+    try { r = extraerJSON('{' + await llamarModelo(system, [{ role: 'user', content: user }, { role: 'assistant', content: '{' }], 400)); } catch (e) { console.error('Plazos LLM:', e.message); continue; }
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Lima' });
+    const validos = (r?.plazos || []).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x.fecha || '') && x.fecha >= hoy && x.accion);
+    for (const x of validos) {
+      const ev = await cal.crearPlazo({ linea: x.linea, titulo: `⏰ ${x.accion}`, fecha: x.fecha, descripcion: `Detectado en correo ${enviado ? 'enviado' : 'de ' + m.de}\nAsunto: ${m.asunto}` });
+      if (ev) { plazos++; avisos.push(`• ${cal.fmt(new Date(x.fecha + 'T12:00:00-05:00')).slice(0, -6)}: ${x.accion}`); }
+    }
+    await db.marcarCorreo(m.id, validos.map(x => `${x.fecha} ${x.accion}`).join(' | ').slice(0, 500) || '-');
+  }
+  if (avisos.length) await enviarWhatsApp(ADMIN_PHONE, `📧 *Plazos detectados en tu correo* (agregados al calendario):\n${avisos.join('\n')}\nSi alguno no corresponde, bórralo en Google Calendar.`);
+  console.log(JSON.stringify({ evento: 'revision_correo', revisados: lista.length, plazos }));
+  return { revisados: lista.length, plazos };
+}
+
+async function bloqueVencimientos(dias = 7) {
+  const ev = await cal.eventos(dias);
+  if (!ev) return '';
+  const v = ev.filter(e => e.todoElDia || /^⏰/.test(e.titulo));
+  return v.length ? v.map(e => '• ' + e.txt).join('\n') : 'Sin vencimientos.';
+}
 
 async function registrarCita(s, ev, titulo, inicio) {
   if (!ev) return;
@@ -294,7 +327,8 @@ async function enviarStatus() {
     `• Leads activos: ${activos.length}${Object.keys(porEtapa).length ? ' (' + Object.entries(porEtapa).map(([k, v]) => `${k} ${v}`).join(', ') + ')' : ''}\n` +
     `• Consultas por responder: ${abiertas.length}\n` +
     (calientes.length ? `• Calientes: ${calientes.slice(0, 5).map(l => `${l.nombre || '+' + l.tel} (${l.linea || '-'})`).join(', ')}\n` : '') +
-    `\n🗓️ *Agenda próximos 3 días*\n${await bloqueAgenda(3)}`;
+    `\n🗓️ *Agenda próximos 3 días*\n${await bloqueAgenda(3)}` +
+    (cal.activo ? `\n\n⏰ *Vencimientos próximos 14 días*\n${await bloqueVencimientos(14)}` : '');
   await enviarWhatsApp(ADMIN_PHONE, txt);
 }
 
@@ -446,6 +480,14 @@ async function procesarComandoAdmin(texto) {
     return true;
   }
   if (/^\/status$/i.test(t)) { await enviarStatus(); return true; }
+  const mco = t.match(/^\/correo(?:\s+(\d{1,3}))?$/i);
+  if (mco) {
+    if (!correo.activo) { await enviarWhatsApp(ADMIN_PHONE, 'El correo aún no está configurado (faltan IMAP_USER e IMAP_PASS en Render).'); return true; }
+    const r = await revisarCorreos(Number(mco[1]) || 24);
+    if (!r.plazos) await enviarWhatsApp(ADMIN_PHONE, `📧 Revisé ${r.revisados} correos nuevos: sin plazos nuevos.`);
+    return true;
+  }
+  if (/^\/vencimientos$/i.test(t)) { await enviarWhatsApp(ADMIN_PHONE, `⏰ *Vencimientos próximos 30 días*\n${await bloqueVencimientos(30)}`); return true; }
   const mag = t.match(/^\/agenda(?:\s+(\d{1,2}))?$/i);
   if (mag) { const n = Number(mag[1]) || 7; await enviarWhatsApp(ADMIN_PHONE, `🗓️ *Agenda próximos ${n} días*\n${await bloqueAgenda(n)}`); return true; }
   if (/^\/(ayuda|help|comandos)$/i.test(t)) { await enviarWhatsApp(ADMIN_PHONE, AYUDA_ADMIN); return true; }
@@ -675,6 +717,7 @@ async function ejecutarSeguimientos() {
     } catch (e) { console.error('Error seguimiento', s.tel, e.message); }
   }
   try { await ejecutarRecordatorios(); } catch (e) { console.error('Error recordatorios citas:', e.message); }
+  try { await revisarCorreos(3); } catch (e) { console.error('Error revisión correo:', e.message); }
   if (manuales.length) await enviarWhatsApp(ADMIN_PHONE, `⏰ *Recordatorios para enviar a mano* (aún no hay plantilla aprobada):\n${manuales.join('\n')}`);
   console.log(JSON.stringify({ evento: 'seguimientos', revisados: candidatos.length, enviados, manuales: manuales.length }));
   return { revisados: candidatos.length, enviados, manuales: manuales.length };
@@ -689,7 +732,7 @@ async function enviarResumenDiario() {
     `Leads activos: ${activos.length} — ${Object.entries(porEtapa).map(([k, v]) => `${k}: ${v}`).join(', ') || '-'}\n` +
     `Consultas sin responder: ${abiertas.length}${abiertas.length ? ' (usa /pendientes)' : ''}\n` +
     (activos.length ? `\nTop:\n${activos.slice(0, 8).map(l => `• +${l.tel} ${l.nombre || ''} · ${l.linea || '-'} · ${l.etapa}`).join('\n')}` : '') +
-    (cal.activo ? `\n\n🗓️ *Agenda de hoy y mañana*\n${await bloqueAgenda(2)}` : '');
+    (cal.activo ? `\n\n🗓️ *Agenda de hoy y mañana*\n${await bloqueAgenda(2)}\n\n⏰ *Vencimientos próximos 7 días*\n${await bloqueVencimientos(7)}` : '');
   await enviarWhatsApp(ADMIN_PHONE, txt);
   return { activos: activos.length, consultas: abiertas.length };
 }

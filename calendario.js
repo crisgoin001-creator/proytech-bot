@@ -87,7 +87,10 @@ async function eventos(dias = 7) {
     for (const [nombre, id] of [['Automatización', CAL.servicios], ['Academy', CAL.academy]]) {
       if (!id) continue;
       const r = await api('get', `/calendars/${encodeURIComponent(id)}/events?singleEvents=true&orderBy=startTime&timeMin=${timeMin}&timeMax=${timeMax}&maxResults=30`);
-      for (const e of r.items || []) { const ini = new Date(e.start.dateTime || e.start.date); out.push({ ini, txt: `${fmt(ini)} · ${e.summary || '(sin título)'} [${nombre}]` }); }
+      for (const e of r.items || []) {
+        if (e.start.date) { const [y, m, d] = e.start.date.split('-').map(Number); const ini = limaAUTC(y, m, d, 0); out.push({ ini, todoElDia: true, titulo: e.summary || '', txt: `${DIAS[partesLima(ini).dow]} ${d}/${m} (todo el día) · ${e.summary || '(sin título)'} [${nombre}]` }); }
+        else { const ini = new Date(e.start.dateTime); out.push({ ini, titulo: e.summary || '', txt: `${fmt(ini)} · ${e.summary || '(sin título)'} [${nombre}]` }); }
+      }
     }
     const fb = await api('post', '/freeBusy', { timeMin, timeMax, timeZone: TZ, items: [{ id: CAL.principal }] });
     for (const b of fb.calendars?.[CAL.principal]?.busy || []) { const ini = new Date(b.start); out.push({ ini, txt: `${fmt(ini)}–${fmt(new Date(b.end)).slice(-5)} · Ocupado [personal]` }); }
@@ -95,4 +98,16 @@ async function eventos(dias = 7) {
   } catch (e) { ultimoErr = e.response?.data?.error?.message || e.message; console.error('Calendar eventos:', e.response?.data || e.message); return null; }
 }
 
-module.exports = { activo, libres, crearEvento, eventos, fmt, calendarioDe, ultimoError: () => ultimoErr };
+// Plazo de todo el día (fecha "YYYY-MM-DD") en el calendario de la línea
+async function crearPlazo({ linea, titulo, fecha, descripcion = '' }) {
+  if (!activo) return null;
+  const [y, m, d] = fecha.split('-').map(Number); const sig = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  try {
+    return await api('post', `/calendars/${encodeURIComponent(calendarioDe(linea))}/events`, {
+      summary: titulo, description: descripcion, start: { date: fecha }, end: { date: sig }, transparency: 'transparent',
+      reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 960 }, { method: 'popup', minutes: 2880 }] },
+    });
+  } catch (e) { ultimoErr = e.response?.data?.error?.message || e.message; console.error('Calendar plazo:', e.response?.data || e.message); return null; }
+}
+
+module.exports = { activo, libres, crearEvento, crearPlazo, eventos, fmt, calendarioDe, ultimoError: () => ultimoErr };

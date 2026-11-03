@@ -69,3 +69,7 @@ alter table revisiones enable row level security;
 -- Citas agendadas (recordatorios a clientes)
 create table if not exists citas (id bigserial primary key, tel text, nombre text, linea text, titulo text, inicio timestamptz, evento_id text, recordado_24 boolean default false, recordado_2 boolean default false, creado timestamptz default now());
 alter table citas enable row level security;
+
+-- Correos ya revisados (detección de plazos)
+create table if not exists correos_vistos (message_id text primary key, resumen text, creado timestamptz default now());
+alter table correos_vistos enable row level security;
