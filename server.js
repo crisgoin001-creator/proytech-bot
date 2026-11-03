@@ -202,7 +202,7 @@ function extraerJSON(texto) {
 
 // ---------- Claude vía OpenRouter ----------
 let avisoSaldo = 0, avisoSaldoBajo = 0;
-const SALDO_MINIMO = Number(process.env.SALDO_MINIMO || 3); // US$
+const SALDO_MINIMO = Number(process.env.SALDO_MINIMO || 1); // US$
 // Saldo de OpenRouter (prepago): créditos comprados − usados
 async function saldoIA() {
   try {
