@@ -198,7 +198,20 @@ function extraerJSON(texto) {
 }
 
 // ---------- Claude vía OpenRouter ----------
-async function llamarModelo(system, mensajes, maxTokens = 500) {
+let avisoSaldo = 0;
+async function llamarModelo(system, mensajes, maxTokens = 500, intento = 1) {
+  try { return await llamarModeloUnaVez(system, mensajes, maxTokens); }
+  catch (e) {
+    const st = e.response?.status;
+    if ((st === 402 || st === 429 || st >= 500) && intento < 3) { await new Promise(r => setTimeout(r, 6000 * intento)); return llamarModelo(system, mensajes, maxTokens, intento + 1); }
+    if (st === 402 && Date.now() - avisoSaldo > 6 * HORA) {
+      avisoSaldo = Date.now();
+      enviarWhatsApp(ADMIN_PHONE, '⚠️ *Saldo de IA agotado* (OpenRouter). El bot no puede redactar respuestas hasta recargar créditos en https://openrouter.ai/settings/credits').catch(() => {});
+    }
+    throw e;
+  }
+}
+async function llamarModeloUnaVez(system, mensajes, maxTokens) {
   const r = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
     model: MODEL,
     max_tokens: maxTokens,
@@ -638,7 +651,13 @@ async function procesarMensaje(msg, contacto) {
     out = await consultarClaude(s);
   } catch (e) {
     console.error('Error OpenRouter:', JSON.stringify(e.response?.data || e.message));
-    await consultarAdmin(tel, s, { linea: s.linea, intencion: 'error_ia', pregunta_admin: 'La IA falló; ¿qué le respondo?' }, texto);
+    const sinSaldo = e.response?.status === 402;
+    // El cliente no se queda sin respuesta: acuse breve y Christian decide el resto
+    if (!s.acuseIA || Date.now() - s.acuseIA > HORA) {
+      s.acuseIA = Date.now();
+      await enviarYRegistrar(s, `${(s.historial || []).length <= 1 ? saludoSegunHora() + '. ' : ''}Gracias por escribirnos. Permítame un momento y le respondo.`);
+    }
+    await consultarAdmin(tel, s, { linea: s.linea, intencion: 'error_ia', pregunta_admin: sinSaldo ? 'Sin saldo de IA (OpenRouter). Recarga créditos o dime qué le respondo.' : 'La IA falló; ¿qué le respondo?' }, texto);
     return;
   }
 
