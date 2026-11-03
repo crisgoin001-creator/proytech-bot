@@ -178,7 +178,7 @@ CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
 En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
 
 FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
-{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"enviar_temario":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
+{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"enviar_temario":true|false,"enviar_brochure":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
 - Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
 - sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).
 - pedir_video=true (solo ACADEMY, una vez por cliente) si ver el laboratorio ayudaría a cerrar: duda de la calidad, los equipos o el lugar; no puede venir a la visita; pide fotos o videos; o está "pensando" tras conocer el precio. En la respuesta al cliente di con naturalidad que en un momento le compartes un video corto del laboratorio. motivo_video = por qué le ayudaría (máx. 1 línea).
@@ -773,6 +773,21 @@ async function procesarMensaje(msg, contacto) {
   }
 
   if (out.respuesta) await enviarYRegistrar(s, out.respuesta);
+
+  // Brochure en PDF solo si lo pide (y mientras su precio esté vigente); la info igual va en el mensaje
+  const BROCHURE_HASTA = process.env.BROCHURE_HASTA || '2026-11-14';
+  const yaTieneBrochure = (s.historial || []).some(m => /\[Documento: brochure PDF\]/.test(m.content || ''));
+  if (out.enviar_brochure && !yaTieneBrochure) {
+    const hoyISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Lima' });
+    if (hoyISO <= BROCHURE_HASTA) {
+      await new Promise(r => setTimeout(r, 3000));
+      if (await enviarDocumento(tel, `${URL_PUBLICA}/archivos/brochure-proytech-academy.pdf`, 'Brochure ProyTech Academy - Curso PLC Siemens.pdf', 'Le comparto nuestro brochure con todo el detalle 📄')) {
+        s.historial.push({ role: 'assistant', content: '[Documento: brochure PDF]' });
+        await db.guardarMensaje(tel, 'assistant', '[Documento: brochure PDF]');
+        out.enviar_temario = false; // el brochure ya incluye el temario
+      }
+    } else await enviarWhatsApp(ADMIN_PHONE, `📄 ${s.nombre || tel} pidió el brochure, pero su precio venció (${BROCHURE_HASTA}). Envíalo tú o pídeme una versión actualizada.`);
+  }
 
   // Temario en PDF (una vez por cliente)
   const yaTieneTemario = (s.historial || []).some(m => /\[Documento: temario PDF\]/.test(m.content || ''));
