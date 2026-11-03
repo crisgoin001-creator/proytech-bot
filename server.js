@@ -126,7 +126,15 @@ function bloqueDatosConfirmados() {
   return datosConfirmados.map(d => `- [${d.fecha}] Ante "${d.consulta}" → Christian indicó: "${d.indicacion}"`).join('\n');
 }
 
+function saludoSegunHora() {
+  const h = Number(new Date().toLocaleString('en-US', { timeZone: 'America/Lima', hour: 'numeric', hour12: false })) % 24;
+  const hora = new Date().toLocaleTimeString('es-PE', { timeZone: 'America/Lima', hour: '2-digit', minute: '2-digit' });
+  const saludo = h >= 5 && h < 12 ? 'Buenos días' : h >= 12 && h < 19 ? 'Buenas tardes' : 'Buenas noches';
+  return { hora, saludo };
+}
+
 function construirPrompt(s) {
+  const { hora, saludo } = saludoSegunHora();
   return `${ESTILO}
 
 CONOCIMIENTO
@@ -136,6 +144,7 @@ DATOS CONFIRMADOS POR CHRISTIAN (son vigentes; úsalos para responder sin volver
 ${bloqueDatosConfirmados()}
 
 ESTADO DE LA CONVERSACIÓN
+- Hora actual en Lima: ${hora}. Si es el primer mensaje de la conversación (o el cliente saluda de nuevo tras mucho tiempo), empieza con "${saludo}" seguido del nombre del cliente si lo conoces. Nunca uses otro saludo de horario distinto.
 - Origen del contacto: ${s.origen || 'desconocido'}
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
 - Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
