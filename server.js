@@ -18,8 +18,10 @@ const ADMIN_PHONE = process.env.ADMIN_PHONE || '51993186475'; // recibe alertas 
 const MODEL = process.env.MODEL || 'anthropic/claude-haiku-4.5';
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_VERSION || 'v25.0'}`;
 const CRON_SECRET = process.env.CRON_SECRET || '';
-const TEMPLATE_D3 = process.env.TEMPLATE_D3 || '';   // plantilla aprobada para recordatorio día 3
-const TEMPLATE_D7 = process.env.TEMPLATE_D7 || '';   // plantilla aprobada para recordatorio día 7
+const TEMPLATE_D3 = process.env.TEMPLATE_D3 || 'seguimiento_dia3';   // plantilla para recordatorio día 3
+const TEMPLATE_D7 = process.env.TEMPLATE_D7 || 'seguimiento_dia7';   // plantilla para recordatorio día 7
+const TEMPLATE_RECORDATORIO = process.env.TEMPLATE_RECORDATORIO || 'recordatorio_cita';
+const WABA_ID = process.env.WABA_ID || '2317633745718895';
 const TEMPLATE_LANG = process.env.TEMPLATE_LANG || 'es';
 const HORA = 36e5, DIA = 24 * HORA;
 const PAUSA_HORAS = Number(process.env.PAUSA_HORAS || 12); // horas que el bot calla cuando tú respondes
@@ -348,7 +350,7 @@ async function ejecutarRecordatorios() {
       : `${saludoSegunHora()}, le recordamos que su ${que} con ProyTech es hoy a las ${cuando.slice(-5)}. Cualquier novedad, nos avisa por aquí.`;
     let ok = false;
     if ((Date.now() - s.ultimoCliente) / HORA < 23.5) ok = await enviarYRegistrar(s, texto);
-    else if (process.env.TEMPLATE_RECORDATORIO) ok = await enviarPlantilla(c.tel, process.env.TEMPLATE_RECORDATORIO, s.nombre);
+    else ok = await enviarPlantilla(c.tel, TEMPLATE_RECORDATORIO, s.nombre, [que, cuando]);
     if (!ok) await enviarWhatsApp(ADMIN_PHONE, `⏰ Recordar a mano a +${c.tel}${s.nombre ? ' (' + s.nombre + ')' : ''}: ${c.titulo} — ${cuando}. (Fuera de la ventana de 24 h; falta plantilla aprobada.)`);
     await db.marcarCita(c.id, { [tipo]: true });
   }
@@ -677,12 +679,12 @@ async function procesarMensaje(msg, contacto) {
 // ---------- Seguimiento automático ----------
 // Paso 1 (~20 h): mensaje libre redactado por Claude (dentro de la ventana de 24 h, gratis).
 // Paso 2 (día 3) y paso 3 (día 7): plantilla aprobada por Meta. Sin plantilla → te aviso para hacerlo a mano.
-async function enviarPlantilla(tel, nombrePlantilla, nombreCliente) {
+async function enviarPlantilla(tel, nombrePlantilla, nombreCliente, extras = []) {
   try {
     await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp', to: tel, type: 'template',
       template: { name: nombrePlantilla, language: { code: TEMPLATE_LANG },
-        components: [{ type: 'body', parameters: [{ type: 'text', text: (nombreCliente || '').split(' ')[0] || 'estimado(a)' }] }] }
+        components: [{ type: 'body', parameters: [{ type: 'text', text: (nombreCliente || '').split(' ')[0] || 'estimado(a)' }, ...extras.map(x => ({ type: 'text', text: String(x) }))] }] }
     }, { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
     console.log(`Plantilla ${nombrePlantilla} enviada a ${tel}`);
     return true;
@@ -819,7 +821,41 @@ app.post('/webhook', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+// Plantillas de WhatsApp: se crean solas en la cuenta si no existen (quedan en revisión de Meta)
+const PLANTILLAS = [
+  { name: 'recordatorio_cita', category: 'UTILITY', language: 'es', components: [{ type: 'BODY',
+    text: 'Hola {{1}}, le recordamos su {{2}} con ProyTech Automatización programada para el {{3}}. Por favor, confírmenos su asistencia respondiendo a este mensaje.',
+    example: { body_text: [['Juan', 'visita técnica', 'jueves 6/11 a las 10:00']] } }] },
+  { name: 'seguimiento_dia3', category: 'UTILITY', language: 'es', components: [{ type: 'BODY',
+    text: 'Hola {{1}}, le escribimos de ProyTech Automatización para saber si pudo revisar la información sobre su consulta. Quedamos atentos para resolver cualquier duda.',
+    example: { body_text: [['Juan']] } }] },
+  { name: 'seguimiento_dia7', category: 'UTILITY', language: 'es', components: [{ type: 'BODY',
+    text: 'Hola {{1}}, retomamos su consulta con ProyTech Automatización. Si aún le interesa, con gusto coordinamos el siguiente paso. Si ya no lo necesita, indíquenos y no volveremos a escribirle.',
+    example: { body_text: [['Juan']] } }] },
+];
+async function estadoPlantillas() {
+  const r = await axios.get(`${GRAPH}/${WABA_ID}/message_templates`, { params: { fields: 'name,status,category,rejected_reason', limit: 50 }, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+  return r.data.data || [];
+}
+async function asegurarPlantillas() {
+  try {
+    const existentes = new Set((await estadoPlantillas()).map(t => t.name));
+    for (const t of PLANTILLAS) {
+      if (existentes.has(t.name)) continue;
+      try {
+        await axios.post(`${GRAPH}/${WABA_ID}/message_templates`, { ...t, allow_category_change: true }, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+        console.log(`Plantilla ${t.name} enviada a revisión`);
+      } catch (e) { console.error(`Error creando plantilla ${t.name}:`, JSON.stringify(e.response?.data || e.message)); }
+    }
+  } catch (e) { console.error('Error plantillas:', JSON.stringify(e.response?.data || e.message)); }
+}
+app.get('/salud/plantillas', async (_req, res) => {
+  try { res.json((await estadoPlantillas()).map(t => ({ name: t.name, status: t.status, category: t.category, motivo: t.rejected_reason }))); }
+  catch (e) { res.json({ error: e.response?.data?.error?.message || e.message }); }
+});
+
 app.listen(PORT, async () => {
+  setTimeout(() => asegurarPlantillas(), 5000);
   console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
   const datos = await db.cargarDatos();
   datos.forEach(d => datosConfirmados.push({ consulta: d.consulta, indicacion: d.indicacion, ts: Date.parse(d.creado), fecha: new Date(d.creado).toLocaleDateString('es-PE', { timeZone: 'America/Lima' }) }));
