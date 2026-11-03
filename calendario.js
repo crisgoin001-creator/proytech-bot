@@ -14,7 +14,7 @@ const HORA_INI = Number(process.env.AGENDA_HORA_INI || 9);
 const HORA_FIN = Number(process.env.AGENDA_HORA_FIN || 18);
 const activo = !!(SA_EMAIL && SA_KEY && (CAL.servicios || CAL.academy));
 
-let token = null, tokenExp = 0;
+let token = null, tokenExp = 0, ultimoErr = null;
 const b64 = o => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64url');
 
 async function obtenerToken() {
@@ -59,7 +59,7 @@ async function libres(dias = 7, duracionMin = 60, max = 6) {
       }
     }
     return out;
-  } catch (e) { console.error('Calendar libres:', e.response?.data || e.message); return []; }
+  } catch (e) { ultimoErr = e.response?.data?.error?.message || e.response?.data?.error_description || e.message; console.error('Calendar libres:', e.response?.data || e.message); return []; }
 }
 
 // inicio: "YYYY-MM-DDTHH:MM" hora Lima
@@ -73,7 +73,7 @@ async function crearEvento({ linea, titulo, inicio, duracionMin = 60, descripcio
       start: { dateTime: a.toISOString(), timeZone: TZ }, end: { dateTime: b.toISOString(), timeZone: TZ },
       reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 1440 }] },
     });
-  } catch (e) { console.error('Calendar crear:', e.response?.data || e.message); return null; }
+  } catch (e) { ultimoErr = e.response?.data?.error?.message || e.message; console.error('Calendar crear:', e.response?.data || e.message); return null; }
 }
 
-module.exports = { activo, libres, crearEvento, calendarioDe };
+module.exports = { activo, libres, crearEvento, calendarioDe, ultimoError: () => ultimoErr };
