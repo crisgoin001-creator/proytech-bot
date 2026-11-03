@@ -245,6 +245,21 @@ async function responderManual(tel, texto, avisar) {
   return ok;
 }
 
+// Mensaje enviado por Christian desde la app (coexistencia): se guarda y el bot se pausa en ese chat
+async function registrarEcoManual(eco) {
+  const tel = eco.to;
+  const texto = eco.text?.body || (eco.type ? `[${eco.type} enviado desde la app]` : '');
+  if (!tel || !texto) return;
+  const s = await obtenerSesion(tel);
+  if (s.nueva) await guardarSesion(s);
+  s.historial.push({ role: 'assistant', content: texto });
+  if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
+  await db.guardarMensaje(tel, 'assistant', texto);
+  s.pausadoHasta = Date.now() + PAUSA_HORAS * HORA;
+  await guardarSesion(s);
+  console.log(JSON.stringify({ evento: 'eco_app', tel, pausa_h: PAUSA_HORAS }));
+}
+
 // Christian responde una consulta: "#12 el precio es ..." / "#12 ok"
 async function procesarComandoAdmin(texto) {
   const t = texto.trim();
@@ -510,6 +525,12 @@ app.post('/webhook', (req, res) => {
   for (const entry of entries) {
     for (const change of entry.changes || []) {
       const value = change.value || {};
+      // Coexistencia: Christian respondió desde la app WhatsApp Business del celular
+      if (change.field === 'smb_message_echoes') {
+        for (const eco of value.message_echoes || []) registrarEcoManual(eco).catch(e => console.error('Error eco:', e.message));
+        continue;
+      }
+      if (change.field && change.field !== 'messages') continue; // history / smb_app_state_sync: se ignoran
       const contactos = value.contacts || [];
       for (const msg of value.messages || []) {
         const contacto = contactos.find(c => c.wa_id === msg.from) || contactos[0];
