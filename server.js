@@ -263,7 +263,7 @@ async function consultarAdmin(tel, s, out, textoCliente) {
     (out.borrador ? `\nBorrador:\n"${out.borrador}"\n` : '') +
     `\nResponde:  *#${id} tu indicación*` + (out.borrador ? `   o   *#${id} ok*` : '');
   const wamid = await enviarWhatsApp(ADMIN_PHONE, msg);
-  if (typeof wamid === 'string') mensajeAConsulta.set(wamid, id);
+  if (typeof wamid === 'string') { mensajeAConsulta.set(wamid, id); await db.guardarWamidConsulta(id, wamid); }
   console.log(JSON.stringify({ evento: 'consulta_admin', id, tel, pregunta: consulta }));
 }
 
@@ -386,7 +386,8 @@ async function procesarMensaje(msg, contacto) {
   // Comandos del administrador (#id respuesta, /pendientes, /datos, /reset)
   if (tel === ADMIN_PHONE) {
     if (texto.toLowerCase() === '/reset') {
-      sesiones.delete(tel); await db.borrarLead(tel);
+      sesiones.delete(tel); await db.borrarLead(tel); await db.cerrarConsultasDe(tel);
+      for (const [k, p] of pendientes) if (p.tel === tel) pendientes.delete(k);
       await enviarWhatsApp(tel, '🔄 Sesión reiniciada (modo prueba).');
       return;
     }
@@ -396,7 +397,7 @@ async function procesarMensaje(msg, contacto) {
     }
     // Respuesta sin "#id": 1) si citó (respondió) el mensaje de la consulta; 2) si hay una sola consulta abierta
     if (!process.env.ADMIN_ES_CLIENTE) {
-      let idc = msg.context?.id ? mensajeAConsulta.get(msg.context.id) : null;
+      let idc = msg.context?.id ? (mensajeAConsulta.get(msg.context.id) || await db.consultaPorWamid(msg.context.id)) : null;
       if (!idc) {
         const abiertas = db.activo ? await db.consultasAbiertas() : [...pendientes.keys()].map(id => ({ id }));
         if (abiertas.length === 1) idc = abiertas[0].id;
