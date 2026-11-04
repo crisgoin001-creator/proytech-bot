@@ -350,7 +350,7 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
-const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /info 51XXXXXXXXX — enviar detalle técnico + brochure de Academy\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
 
 // Revisa el correo de la empresa y convierte compromisos con fecha en plazos del calendario
 async function revisarCorreos(horas = 3) {
@@ -568,6 +568,8 @@ async function procesarComandoAdmin(texto) {
     return true;
   }
   if (/^\/status$/i.test(t)) { await enviarStatus(); return true; }
+  const mi = t.match(/^\/info\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)$/i);
+  if (mi) { const ok = await enviarInfoAcademy(mi[1]); await enviarWhatsApp(ADMIN_PHONE, ok ? `📄 Detalle técnico + brochure enviados a ${mi[1]}.` : `⚠️ No pude enviar la información a ${mi[1]}.`); return true; }
   const muc = t.match(/^\/ultimoscupos(\s+enviar)?(?:\s+(.+))?$/i);
   if (muc) {
     const fecha = (muc[2] || '14 de noviembre').trim();
@@ -862,6 +864,23 @@ const INSTRUCCION_PASO = {
   1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → visitar el laboratorio y ver los equipos Siemens reales; Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
   2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (3–4 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Estructura: 1) pregunta amable si le quedó alguna consulta; 2) ofrece como ayuda (no como oferta comercial) darle más detalles por una llamada de WhatsApp con uno de nuestros ingenieros o que nos visite en el laboratorio; 3) si le interesa, que puede separar su vacante con S/ 200 con la garantía de reembolso si el curso no inicia (Servicios: preparar su cotización o coordinar una visita técnica). Urgencia SOLO si es real (grupo con fecha de inicio, máximo 2 alumnos por estación). Sin pedir número y sin dar nombres. Divide el texto en DOS mensajes separados por "||": el primero con los puntos 1 y 2 (consulta + llamada o visita); el segundo, corto, con el punto 3 (separar con garantía). Deséale buena tarde/noche según la hora.',
 };
+// Envía al instante el detalle técnico de Academy + brochure (Christian lo pide con /info tel)
+async function enviarInfoAcademy(tel) {
+  const s = await obtenerSesion(tel);
+  if (!s.linea) s.linea = 'academy';
+  const instr = 'El cliente pidió información del curso. Sigue el PROCESO OBLIGATORIO: entrega el DETALLE TÉCNICO (1 línea de presentación, los 3 módulos del temario con 1–2 viñetas "• " cada uno, fechas y precio con separación de S/ 200), di que le adjuntas el brochure en PDF con todo el detalle y cierra preguntando qué parte le interesa más (programación en TIA Portal, señales analógicas o HMI). Sin preguntas de descubrimiento.';
+  const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${instr} Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
+  const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nFECHA DE HOY (Lima): ' + hoyLima() + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 600)).trim();
+  if (!texto || !(await enviarYRegistrar(s, texto))) return false;
+  await new Promise(r => setTimeout(r, 3000));
+  if (await enviarDocumento(tel, `${URL_PUBLICA}/archivos/brochure-proytech-academy.pdf`, 'Brochure ProyTech Academy - Curso PLC Siemens.pdf', 'Brochure ProyTech Academy 📄')) {
+    s.historial.push({ role: 'assistant', content: '[Documento: brochure PDF]' }); await db.guardarMensaje(tel, 'assistant', '[Documento: brochure PDF]');
+  }
+  s.etapa = s.etapa === 'nuevo' ? 'perfilando' : s.etapa; s.seguimientos = 1; s.proximoSeguimiento = Date.now() + 50 * 60000;
+  await guardarSesion(s);
+  return true;
+}
+
 const tieneTemario = s => (s.historial || []).some(m => /\[Documento: (temario|brochure) PDF\]/.test(m.content || ''));
 async function seguimientoLibre(s, paso) {
   // Academy, paso de 1 h: si aún no recibió el temario, se lo damos como valor nuevo (texto breve + PDF)
@@ -1077,6 +1096,16 @@ app.get('/salud/plantillas', async (_req, res) => {
 });
 
 app.listen(PORT, async () => {
+  setTimeout(async () => {
+    try {
+      const tel = '51992427877';
+      const s = await obtenerSesion(tel);
+      if (!(s.historial || []).some(m => /\[Documento: brochure PDF\]/.test(m.content || ''))) {
+        const ok = await enviarInfoAcademy(tel);
+        await enviarWhatsApp(ADMIN_PHONE, ok ? '📄 Envié a Oskar (992 427 877) el detalle técnico del curso + brochure, como pediste.' : '⚠️ No pude enviar la información a Oskar.');
+      }
+    } catch (e) { console.error('Envío puntual Oskar:', e.message); }
+  }, 15000);
   setTimeout(() => asegurarPlantillas(), 5000);
   console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
   const datos = await db.cargarDatos();
