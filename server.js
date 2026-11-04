@@ -919,8 +919,8 @@ async function procesarEmbudo() {
       const paso = s.seguimientos || 0;
       if (paso <= 2) {
         if (ahora > finVentana) { s.seguimientos = 3; s.proximoSeguimiento = fechaPlantilla(s, 0); }
-        else if (h < 8 || h >= 21) { // de noche no se escribe: se pasa a las 8:30 si sigue la ventana
-          const manana = proximaHoraLima(8, 30);
+        else if ((ahora - s.ultimoCliente) > 3 * HORA && (h < 7 || h >= 23)) { // solo si el cliente no está activo: se evita de 11 pm a 7 am
+          const manana = proximaHoraLima(7, 30);
           if (manana < finVentana) s.proximoSeguimiento = manana; else { s.seguimientos = 3; s.proximoSeguimiento = fechaPlantilla(s, 0); }
         } else {
           if (await seguimientoLibre(s, paso)) enviados++;
@@ -932,7 +932,7 @@ async function procesarEmbudo() {
           } else s.proximoSeguimiento = fechaPlantilla(s, 0);
         }
       } else if (paso === 3 || paso === 4) {
-        if (h < 9 || h >= 20) { s.proximoSeguimiento = proximaHoraLima(9, 30); }
+        if (h < 7 || h >= 23) { s.proximoSeguimiento = proximaHoraLima(8, 0); }
         else {
           const tpl = paso === 3 ? TEMPLATE_D3 : TEMPLATE_D7;
           if (tpl && await enviarPlantilla(s.tel, tpl, s.nombre)) { enviados++; await db.guardarMensaje(s.tel, 'assistant', `[Plantilla ${tpl}]`); }
