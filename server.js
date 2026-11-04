@@ -800,6 +800,8 @@ async function procesarMensaje(msg, contacto) {
   }
 
   if (out.etapa) s.etapa = out.etapa;
+  // un lead comercial que ya recibió respuesta entra al embudo de seguimiento
+  if (s.etapa === 'nuevo' && ['servicios', 'academy'].includes(s.linea)) s.etapa = 'perfilando';
   if (out.resumen_lead) s.resumen = out.resumen_lead;
   if (out.consultar_admin && !s.pendiente) await consultarAdmin(tel, s, out, texto);
   else if (out.consultar_admin && s.pendiente) {
