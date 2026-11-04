@@ -982,6 +982,37 @@ setInterval(() => { const h = horaLima(); if (h >= 7 && h < 22 && process.env.RE
 app.get('/', (_req, res) => res.send(`ProyTech Bot v3 activo · BD ${db.activo ? 'conectada' : 'en RAM'}`));
 // Diagnóstico sin datos sensibles: solo indica si el calendario responde
 app.get('/salud/calendario', async (_req, res) => { const l = await cal.libres(7); const ev = await cal.eventos(14); res.json({ activo: cal.activo, bloques_libres: l.length, eventos_14d: ev ? ev.length : null, ultimo_error: cal.ultimoError() }); });
+// Simulación interna (no envía WhatsApp ni guarda nada): casos fijos de primer mensaje y continuación
+const CASOS_SIM = {
+  1: { origen: 'web_academy', turnos: ['Hola ProyTech Academy, quiero información del curso'] },
+  2: { origen: 'directo', turnos: ['Hola *ProyTech Automatización*. Necesito más información sobre sus servicios en cursos de PLC'] },
+  3: { origen: 'directo', turnos: ['info del curso de plc porfa'] },
+  4: { origen: 'web_academy', turnos: ['Hola ProyTech Academy, quiero conocer el precio del curso (ref: academy_nov26_gads)'] },
+  5: { origen: 'directo', turnos: ['Buenas noches, me pueden dar información?'] },
+  6: { origen: 'web_academy', turnos: ['Hola ProyTech Academy, quiero información del curso', 'sí, por favor'] },
+  7: { origen: 'web_academy', turnos: ['Hola ProyTech Academy, quiero información del curso', 'sí, envíemelo', 'me interesa más el HMI, trabajo en mantenimiento'] },
+};
+let simUso = { t: 0, n: 0 };
+app.get('/salud/simular', async (req, res) => {
+  if (Date.now() - simUso.t > HORA) simUso = { t: Date.now(), n: 0 };
+  if (++simUso.n > 25) return res.status(429).json({ error: 'límite de simulaciones por hora' });
+  const c = CASOS_SIM[req.query.caso];
+  if (!c) return res.json({ casos: Object.keys(CASOS_SIM) });
+  const s = sesionNueva('SIMULACION'); s.origen = c.origen; s.linea = detectarLinea(c.turnos[0]);
+  const pasos = [];
+  try {
+    for (const t of c.turnos) {
+      s.historial.push({ role: 'user', content: t });
+      const out = await consultarClaude(s);
+      if (out.linea && ['servicios', 'academy'].includes(out.linea)) s.linea = out.linea;
+      const resp = formatearParaCliente(out.respuesta || '');
+      s.historial.push({ role: 'assistant', content: resp });
+      if (out.enviar_brochure) s.historial.push({ role: 'assistant', content: '[Documento: brochure PDF]' });
+      pasos.push({ cliente: t, bot: resp, linea: out.linea, etapa: out.etapa, enviar_brochure: !!out.enviar_brochure, enviar_temario: !!out.enviar_temario, consultar_admin: !!out.consultar_admin });
+    }
+    res.json({ caso: Number(req.query.caso), pasos });
+  } catch (e) { res.json({ error: e.response?.data?.error?.message || e.message, pasos }); }
+});
 app.get('/salud/ia', async (_req, res) => { const r = await saldoIA(); res.json({ ok: r.ok, saldo_bajo: r.ok ? r.saldo < SALDO_MINIMO : null, error: r.error || null }); });
 app.get('/salud/correo', async (_req, res) => { const r = await correo.probar(); res.json({ activo: correo.activo, ...r }); });
 
