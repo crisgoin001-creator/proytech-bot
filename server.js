@@ -867,7 +867,7 @@ async function seguimientoLibre(s, paso) {
   // Academy, paso de 1 h: si aún no recibió el temario, se lo damos como valor nuevo (texto breve + PDF)
   const darTemario = paso === 1 && s.linea === 'academy' && !tieneTemario(s);
   const instr = darTemario
-    ? 'Ha pasado aproximadamente una hora sin respuesta. Comparte como valor el temario del curso: una línea de introducción y los 3 módulos con 2 viñetas "• " cada uno (resumidos del CONOCIMIENTO), di que le adjuntas el temario completo en PDF y cierra invitándolo a conocer el laboratorio en Surquillo sin compromiso con una pregunta fácil ("¿Le acomoda pasar esta semana?").'
+    ? 'Ha pasado aproximadamente una hora sin respuesta y aún no recibió el detalle técnico. Sigue el PROCESO OBLIGATORIO (PASO A): una línea de introducción y los 3 módulos del temario con 1–2 viñetas "• " cada uno (resumidos del CONOCIMIENTO), y cierra preguntando SOLO si desea el brochure: "¿Le comparto nuestro brochure en PDF con todo el detalle del curso?".'
     : INSTRUCCION_PASO[paso];
   const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${instr} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
   const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nFECHA DE HOY (Lima): ' + hoyLima() + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 300)).trim();
@@ -876,7 +876,7 @@ async function seguimientoLibre(s, paso) {
   const partes = texto.split('||').map(x => x.trim()).filter(Boolean).slice(0, 2);
   let ok = false;
   for (const [k, parte] of partes.entries()) { if (k) await new Promise(r => setTimeout(r, 4000)); ok = (await enviarYRegistrar(s, parte)) || ok; }
-  if (ok && darTemario) {
+  if (false && ok && darTemario) { // el PDF ahora se envía solo si acepta el brochure
     await new Promise(r => setTimeout(r, 3000));
     if (await enviarDocumento(s.tel, `${URL_PUBLICA}/archivos/temario-curso-plc-proytech.pdf`, 'Temario Curso PLC Siemens - ProyTech Academy.pdf', 'Temario completo del curso 📄')) {
       s.historial.push({ role: 'assistant', content: '[Documento: temario PDF]' }); await db.guardarMensaje(s.tel, 'assistant', '[Documento: temario PDF]');
