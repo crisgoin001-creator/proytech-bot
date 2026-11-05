@@ -1107,14 +1107,14 @@ app.post('/salud/simular', async (req, res) => {
   const turnos = (req.body?.turnos || []).slice(0, 6).map(t => String(t).slice(0, 600));
   if (!turnos.length) return res.status(400).json({ error: 'faltan turnos' });
   CASOS_SIM.libre = { origen: req.body.origen || 'directo', turnos };
-  req.query.caso = 'libre';
-  return simular(req, res);
+  return simular(req, res, 'libre');
 });
 app.get('/salud/simular', (req, res) => simular(req, res));
-async function simular(req, res) {
+async function simular(req, res, casoForzado) {
+  const caso = casoForzado || req.query.caso;
   if (Date.now() - simUso.t > HORA) simUso = { t: Date.now(), n: 0 };
   if (++simUso.n > 60) return res.status(429).json({ error: 'límite de simulaciones por hora' });
-  const c = CASOS_SIM[req.query.caso];
+  const c = CASOS_SIM[caso];
   if (!c) return res.json({ casos: Object.keys(CASOS_SIM) });
   const s = sesionNueva('SIMULACION'); s.origen = c.origen; s.linea = detectarLinea(c.turnos[0]);
   const pasos = [];
@@ -1129,7 +1129,7 @@ async function simular(req, res) {
       if (out.enviar_brochure) s.historial.push({ role: 'assistant', content: '[Documento: brochure PDF]' });
       pasos.push({ cliente: t, bot: resp, linea: out.linea, etapa: out.etapa, enviar_brochure: !!out.enviar_brochure, enviar_temario: !!out.enviar_temario, consultar_admin: !!out.consultar_admin, pregunta_admin: out.pregunta_admin || '' });
     }
-    res.json({ caso: req.query.caso, pasos });
+    res.json({ caso, pasos });
   } catch (e) { res.json({ error: e.response?.data?.error?.message || e.message, pasos }); }
 }
 app.get('/salud/ia', async (_req, res) => { const r = await saldoIA(); res.json({ ok: r.ok, saldo_bajo: r.ok ? r.saldo < SALDO_MINIMO : null, error: r.error || null }); });
