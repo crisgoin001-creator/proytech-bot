@@ -73,7 +73,8 @@ async function obtenerSesion(tel) {
       proximoSeguimiento: lead.proximo_seguimiento ? Date.parse(lead.proximo_seguimiento) : null,
       pausadoHasta: lead.pausado_hasta ? Date.parse(lead.pausado_hasta) : null, nueva: false
     });
-    s.historial = await db.cargarMensajes(tel, MAX_HISTORIAL);
+    // Se limpia el historial de ruido antiguo (JSON filtrado, avisos internos, revocados) para no confundir al modelo
+    s.historial = (await db.cargarMensajes(tel, MAX_HISTORIAL)).filter(m => m.role === 'user' || (esSeguroParaCliente(m.content) && !/^\[(revoke|reaction|unsupported)/i.test(m.content || '')));
   }
   sesiones.set(tel, s);
   return s;
@@ -104,8 +105,15 @@ function enBurbujas(texto) {
   return out;
 }
 const PAUSA_HUMANA = process.env.PAUSA_HUMANA !== 'no';
+const RX_FUGA = /"(linea|intencion|confianza|etapa|consultar_admin|pregunta_admin|borrador|respuesta|resumen_lead)"\s*:|\[Instrucci[oó]n interna|instrucciones que recib|no tengo una indicaci[oó]n|indicaci[oó]n (clara )?de christian|seg[uú]n christian|christian (me )?indic|NO_ENVIAR|consulta #\d|como (modelo|asistente) de (ia|lenguaje)/i;
+function esSeguroParaCliente(t) { return !!String(t || '').trim() && !RX_FUGA.test(t) && !/^\s*[{\[]/.test(t); }
 async function enviarYRegistrar(s, textoOriginal) {
   const texto = formatearParaCliente(textoOriginal);
+  if (s.tel !== ADMIN_PHONE && !esSeguroParaCliente(texto)) {
+    console.error('BLOQUEADO (contenido interno):', texto.slice(0, 300));
+    await enviarWhatsApp(ADMIN_PHONE, `🛡️ Bloqueé un mensaje del bot a ${esTelefono(s.tel) ? '+' + s.tel : s.tel}${s.nombre ? ' (' + s.nombre + ')' : ''} porque tenía texto interno. Respóndele tú o dime qué decir:\n"${texto.slice(0, 400)}"`);
+    return false;
+  }
   const partes = enBurbujas(texto);
   let okTodo = false;
   for (const [i, parte] of partes.entries()) {
@@ -222,7 +230,7 @@ CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
 En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
 
 FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
-{"linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"enviar_temario":true|false,"enviar_brochure":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","respuesta":"texto para el cliente"}
+{"respuesta":"texto para el cliente","linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"enviar_temario":true|false,"enviar_brochure":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":""}
 - Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
 - sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).
 - pedir_video=true (solo ACADEMY, una vez por cliente) si ver el laboratorio ayudaría a cerrar: duda de la calidad, los equipos o el lugar; no puede venir a la visita; pide fotos o videos; o está "pensando" tras conocer el precio. En la respuesta al cliente di con naturalidad que en un momento le compartes un video corto del laboratorio. motivo_video = por qué le ayudaría (máx. 1 línea).
@@ -245,6 +253,17 @@ ESTADO DE LA CONVERSACIÓN
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
 - Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
 `;
+}
+
+function rescatarCampos(crudo) {
+  const str = k => { const m = crudo.match(new RegExp('"' + k + '"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"')); if (!m) return undefined; try { return JSON.parse('"' + m[1] + '"'); } catch (_) { return m[1]; } };
+  const bool = k => { const m = crudo.match(new RegExp('"' + k + '"\\s*:\\s*(true|false)')); return m ? m[1] === 'true' : false; };
+  const respuesta = str('respuesta');
+  if (typeof respuesta !== 'string' || !respuesta.trim()) return null;
+  return { respuesta, linea: str('linea'), intencion: str('intencion') || 'rescatado', confianza: str('confianza') || 'media', etapa: str('etapa'),
+    consultar_admin: bool('consultar_admin'), pregunta_admin: str('pregunta_admin') || '', borrador: str('borrador') || '', sugerir_llamada: bool('sugerir_llamada'),
+    motivo_llamada: str('motivo_llamada') || '', pedir_video: bool('pedir_video'), enviar_temario: bool('enviar_temario'), enviar_brochure: bool('enviar_brochure'),
+    nombre_cliente: str('nombre_cliente') || '', resumen_lead: str('resumen_lead') || '' };
 }
 
 function extraerJSON(texto) {
@@ -322,14 +341,18 @@ async function llamarModeloUnaVez(system, mensajes, maxTokens, modelos = null) {
 }
 
 async function consultarClaude(s) {
-  const crudo = '{' + await llamarModelo(construirPrompt(s), [...s.historial, { role: 'assistant', content: '{' }]);
-  const out = extraerJSON(crudo);
-  if (!out || typeof out.respuesta !== 'string') {
-    console.error('Salida no JSON del modelo:', crudo);
-    const limpio = crudo.replace(/^\{\s*/, '').trim();
-    return { linea: 'indefinida', intencion: 'error_formato', confianza: 'baja', consultar_admin: false, respuesta: limpio };
+  for (let intento = 1; intento <= 2; intento++) {
+    const extra = intento === 2 ? [{ role: 'user', content: '[Instrucción interna] Tu salida anterior no fue un JSON válido. Devuelve SOLO el JSON, breve (pregunta_admin y borrador de máximo 2 frases), empezando por "respuesta".' }] : [];
+    const crudo = '{' + await llamarModelo(construirPrompt(s), [...s.historial, ...extra, { role: 'assistant', content: '{' }], 1200);
+    const out = extraerJSON(crudo);
+    if (out && typeof out.respuesta === 'string') return out;
+    // JSON cortado o mal escapado: rescatar al menos la respuesta y los campos clave
+    const r = rescatarCampos(crudo);
+    if (r) { console.log(JSON.stringify({ evento: 'json_rescatado', intento })); return r; }
+    console.error('Salida no JSON del modelo (intento ' + intento + '):', crudo.slice(0, 500));
   }
-  return out;
+  // Nunca se envía texto crudo al cliente: se consulta a Christian
+  return { linea: s.linea || 'indefinida', intencion: 'error_formato', confianza: 'baja', consultar_admin: true, pregunta_admin: 'No pude redactar bien la respuesta; ¿qué le respondo?', respuesta: '' };
 }
 
 // Redacta la respuesta final al cliente a partir de lo que indicó Christian
@@ -346,6 +369,8 @@ TAREA: Christian (gerente) te indicó qué responder al cliente. Redacta el sigu
 Pregunta pendiente: "${consulta}"
 Indicación de Christian: "${indicacion}"
 Mantén el mismo trato (usted o tú) que venías usando con el cliente, aunque la indicación de Christian esté escrita de otra forma.
+Si la indicación de Christian NO es un contenido para el cliente sino una instrucción para ti (por ejemplo "no respondas", "yo le contesto", "déjalo", "espera"), devuelve exactamente: NO_ENVIAR
+Nunca menciones a Christian, indicaciones, instrucciones ni consultas en el mensaje.
 Devuelve SOLO el texto del mensaje, sin comillas ni explicaciones.`;
   const mensajes = [...s.historial, { role: 'user', content: '[Instrucción interna, no visible al cliente] Redacta ahora el mensaje final para el cliente según la indicación de Christian.' }];
   let texto = (await llamarModelo(system, mensajes, 400)).trim().replace(/^"|"$/g, '');
@@ -558,7 +583,8 @@ let ultimoPausado = null;
 async function registrarEcoManual(eco) {
   const tel = eco.to || eco.to_user_id;
   if (!tel || tel === ADMIN_PHONE) return; // chat interno con Christian
-  const texto = eco.text?.body || (eco.type ? `[${eco.type} enviado desde la app]` : '');
+  if (['revoke', 'reaction', 'unsupported', 'system', 'ephemeral'].includes(eco.type)) { const sx = await obtenerSesion(tel); sx.pausadoHasta = Date.now() + PAUSA_HORAS * HORA; await guardarSesion(sx); return; }
+  const texto = eco.text?.body || (eco.type ? `[${eco.type === 'image' ? 'Imagen' : eco.type === 'document' ? 'Documento' : 'Archivo'} enviado por el equipo]` : '');
   if (!tel || !texto) return;
   const s = await obtenerSesion(tel);
   if (s.nueva) await guardarSesion(s);
@@ -664,7 +690,20 @@ async function procesarComandoAdmin(texto) {
   if (!p) { await enviarWhatsApp(ADMIN_PHONE, `No encuentro la consulta #${id} abierta. Usa /pendientes.`); return true; }
   const s = await obtenerSesion(p.tel);
   const esOk = /^ok$/i.test(indicacion);
+  // Instrucciones para el bot (no para el cliente): cerrar la consulta y dejar que Christian atienda
+  if (/^(no (le )?(contestes|respondas|escribas)|yo (le )?(respondo|contesto|escribo|me encargo)|d[eé]ja(lo|la)|ignora|espera|no env[ií]es)/i.test(indicacion)) {
+    pendientes.delete(id); await db.cerrarConsulta(id);
+    const sx = await obtenerSesion(p.tel); sx.pendiente = null; sx.pausadoHasta = Date.now() + PAUSA_HORAS * HORA; await guardarSesion(sx);
+    await enviarWhatsApp(ADMIN_PHONE, `👌 Entendido: no respondo a ${p.tel}. Pausé el bot ${PAUSA_HORAS} h en ese chat (reactiva con /bot ${p.tel}).`);
+    return true;
+  }
   let final = esOk && p.borrador ? p.borrador : await redactarConIndicacion(s, p.consulta, indicacion);
+  if (final && /^\s*NO_ENVIAR\s*$/.test(final)) {
+    pendientes.delete(id); await db.cerrarConsulta(id);
+    const sx = await obtenerSesion(p.tel); sx.pendiente = null; sx.pausadoHasta = Date.now() + PAUSA_HORAS * HORA; await guardarSesion(sx);
+    await enviarWhatsApp(ADMIN_PHONE, `👌 Entendido: no le escribo a ${p.tel}. Bot en pausa ${PAUSA_HORAS} h en ese chat.`);
+    return true;
+  }
   if (!final) { await enviarWhatsApp(ADMIN_PHONE, `⚠️ No pude redactar #${id}. Reintenta con otra indicación o escribe: #${id} ok`); return true; }
   const ctxCliente = ultimoMensajeCliente(s);
   if (await enviarYRegistrar(s, final)) {
@@ -839,6 +878,7 @@ async function procesarMensaje(msg, contacto) {
   }
 
   if (out.respuesta) await enviarYRegistrar(s, out.respuesta);
+  else if (out.intencion === 'error_formato' || out.intencion === 'error_ia') await enviarYRegistrar(s, 'Permítame un momento, por favor, y le confirmo.');
 
   // Brochure en PDF solo si lo pide (y mientras su precio esté vigente); la info igual va en el mensaje
   const BROCHURE_HASTA = process.env.BROCHURE_HASTA || '2026-11-14';
@@ -1060,9 +1100,20 @@ const CASOS_SIM = {
   10: { origen: 'directo', turnos: ['hola', 'tengo un tablero que se dispara', 'es de una bomba'] },
 };
 let simUso = { t: 0, n: 0 };
-app.get('/salud/simular', async (req, res) => {
+// Pruebas libres (POST {origen, turnos:[...]}) habilitadas solo hasta SIM_LIBRE_HASTA para no exponer costos
+const SIM_LIBRE_HASTA = process.env.SIM_LIBRE_HASTA || '2026-11-08';
+app.post('/salud/simular', async (req, res) => {
+  if (new Date().toISOString().slice(0, 10) > SIM_LIBRE_HASTA) return res.status(403).json({ error: 'pruebas libres deshabilitadas' });
+  const turnos = (req.body?.turnos || []).slice(0, 6).map(t => String(t).slice(0, 600));
+  if (!turnos.length) return res.status(400).json({ error: 'faltan turnos' });
+  CASOS_SIM.libre = { origen: req.body.origen || 'directo', turnos };
+  req.query.caso = 'libre';
+  return simular(req, res);
+});
+app.get('/salud/simular', (req, res) => simular(req, res));
+async function simular(req, res) {
   if (Date.now() - simUso.t > HORA) simUso = { t: Date.now(), n: 0 };
-  if (++simUso.n > 25) return res.status(429).json({ error: 'límite de simulaciones por hora' });
+  if (++simUso.n > 60) return res.status(429).json({ error: 'límite de simulaciones por hora' });
   const c = CASOS_SIM[req.query.caso];
   if (!c) return res.json({ casos: Object.keys(CASOS_SIM) });
   const s = sesionNueva('SIMULACION'); s.origen = c.origen; s.linea = detectarLinea(c.turnos[0]);
@@ -1072,14 +1123,15 @@ app.get('/salud/simular', async (req, res) => {
       s.historial.push({ role: 'user', content: t });
       const out = await consultarClaude(s);
       if (out.linea && ['servicios', 'academy'].includes(out.linea)) s.linea = out.linea;
-      const resp = formatearParaCliente(out.respuesta || '');
+      const resp0 = formatearParaCliente(out.respuesta || '');
+      const resp = esSeguroParaCliente(resp0) ? resp0 : (resp0 ? '🛡️BLOQUEADO: ' + resp0.slice(0, 200) : '(sin respuesta: acuse «Permítame un momento…» + consulta a Christian)');
       s.historial.push({ role: 'assistant', content: resp });
       if (out.enviar_brochure) s.historial.push({ role: 'assistant', content: '[Documento: brochure PDF]' });
-      pasos.push({ cliente: t, bot: resp, linea: out.linea, etapa: out.etapa, enviar_brochure: !!out.enviar_brochure, enviar_temario: !!out.enviar_temario, consultar_admin: !!out.consultar_admin });
+      pasos.push({ cliente: t, bot: resp, linea: out.linea, etapa: out.etapa, enviar_brochure: !!out.enviar_brochure, enviar_temario: !!out.enviar_temario, consultar_admin: !!out.consultar_admin, pregunta_admin: out.pregunta_admin || '' });
     }
-    res.json({ caso: Number(req.query.caso), pasos });
+    res.json({ caso: req.query.caso, pasos });
   } catch (e) { res.json({ error: e.response?.data?.error?.message || e.message, pasos }); }
-});
+}
 app.get('/salud/ia', async (_req, res) => { const r = await saldoIA(); res.json({ ok: r.ok, saldo_bajo: r.ok ? r.saldo < SALDO_MINIMO : null, error: r.error || null }); });
 app.get('/salud/correo', async (_req, res) => { const r = await correo.probar(); res.json({ activo: correo.activo, ...r }); });
 
