@@ -74,7 +74,7 @@ async function obtenerSesion(tel) {
       pausadoHasta: lead.pausado_hasta ? Date.parse(lead.pausado_hasta) : null, nueva: false
     });
     // Se limpia el historial de ruido antiguo (JSON filtrado, avisos internos, revocados) para no confundir al modelo
-    s.historial = (await db.cargarMensajes(tel, MAX_HISTORIAL)).filter(m => m.role === 'user' || (esSeguroParaCliente(m.content) && !/^\[(revoke|reaction|unsupported)/i.test(m.content || '')));
+    s.historial = (await db.cargarMensajes(tel, MAX_HISTORIAL)).filter(m => m.role === 'user' || /^\[(Documento|Plantilla)/.test(m.content || '') || (esSeguroParaCliente(m.content) && !/^\[(revoke|reaction|unsupported)/i.test(m.content || '')));
   }
   sesiones.set(tel, s);
   return s;
@@ -88,7 +88,7 @@ async function guardarSesion(s) {
 const esperar = ms => new Promise(r => setTimeout(r, ms));
 // Marca el mensaje del cliente como leído y muestra "escribiendo…" (WhatsApp lo mantiene hasta 25 s o hasta la respuesta)
 async function mostrarEscribiendo(msgId) {
-  if (!msgId) return;
+  if (!msgId || MODO_SUPERVISADO) return;
   try {
     await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', status: 'read', message_id: msgId, typing_indicator: { type: 'text' } },
       { timeout: 8000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
@@ -396,6 +396,7 @@ const esTelefono = id => /^\d{6,16}$/.test(String(id || ''));
 const destino = id => (esTelefono(id) ? { to: id } : { recipient: id });
 
 async function enviarDocumento(to, link, filename, caption) {
+  if (MODO_SUPERVISADO && to !== ADMIN_PHONE) { await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviado a ${to}: documento ${filename}`); return false; }
   try {
     await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: 'whatsapp', ...destino(to), type: 'document', document: { link, filename, caption } },
@@ -405,8 +406,15 @@ async function enviarDocumento(to, link, filename, caption) {
   } catch (e) { console.error(`Error documento a ${to}:`, JSON.stringify(e.response?.data || e.message)); return false; }
 }
 
+// MODO SUPERVISADO: mientras esté activo, el bot NO escribe a clientes; reenvía a Christian lo que habría dicho
+const MODO_SUPERVISADO = process.env.MODO_SUPERVISADO !== 'no';
 async function enviarWhatsApp(to, body) {
   if (!to) { console.error('enviarWhatsApp sin destinatario'); return false; }
+  if (MODO_SUPERVISADO && to !== ADMIN_PHONE) {
+    console.log(JSON.stringify({ evento: 'supervisado_retenido', to, texto: String(body).slice(0, 200) }));
+    await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviado a ${esTelefono(to) ? '+' + to : to}:\n"${String(body).slice(0, 900)}"`);
+    return false;
+  }
   try {
     const r = await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: 'whatsapp', ...destino(to), type: 'text', text: { body } },
@@ -483,6 +491,7 @@ async function enviarStatus() {
 
 // Recordatorios de citas: ~24 h antes y ~2 h antes
 async function ejecutarRecordatorios() {
+  if (MODO_SUPERVISADO) return;
   if (!db.activo) return;
   const citas = await db.citasProximas(26);
   for (const c of citas) {
@@ -938,6 +947,7 @@ async function procesarMensaje(msg, contacto) {
 // Paso 1 (~20 h): mensaje libre redactado por Claude (dentro de la ventana de 24 h, gratis).
 // Paso 2 (día 3) y paso 3 (día 7): plantilla aprobada por Meta. Sin plantilla → te aviso para hacerlo a mano.
 async function enviarPlantilla(tel, nombrePlantilla, nombreCliente, extras = []) {
+  if (MODO_SUPERVISADO && tel !== ADMIN_PHONE) { await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviada plantilla ${nombrePlantilla} a ${tel}`); return false; }
   try {
     await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp', ...destino(tel), type: 'template',
@@ -1009,6 +1019,7 @@ async function seguimientoLibre(s, paso) {
 }
 
 async function procesarEmbudo() {
+  if (MODO_SUPERVISADO) return { revisados: 0, enviados: 0, manuales: 0 }; // en modo supervisado no hay seguimientos automáticos
   const ahora = Date.now();
   let candidatos;
   if (db.activo) candidatos = await Promise.all((await db.leadsParaSeguimiento()).map(l => obtenerSesion(l.tel)));
@@ -1246,16 +1257,6 @@ app.get('/salud/plantillas', async (_req, res) => {
 });
 
 app.listen(PORT, async () => {
-  setTimeout(async () => {
-    try {
-      const tel = '51992427877';
-      const s = await obtenerSesion(tel);
-      if (!(s.historial || []).some(m => /\[Documento: brochure PDF\]/.test(m.content || ''))) {
-        const ok = await enviarInfoAcademy(tel);
-        await enviarWhatsApp(ADMIN_PHONE, ok ? '📄 Envié a Oskar (992 427 877) el detalle técnico del curso + brochure, como pediste.' : '⚠️ No pude enviar la información a Oskar.');
-      }
-    } catch (e) { console.error('Envío puntual Oskar:', e.message); }
-  }, 15000);
   setTimeout(() => asegurarPlantillas(), 5000);
   console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
   const datos = await db.cargarDatos();
