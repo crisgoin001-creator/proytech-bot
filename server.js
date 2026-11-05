@@ -17,7 +17,7 @@ const APP_SECRET = process.env.APP_SECRET || '';            // opcional: valida 
 const ADMIN_PHONE = process.env.ADMIN_PHONE || '51993186475'; // recibe alertas de derivación
 const MODEL = process.env.MODEL || 'anthropic/claude-haiku-4.5';
 // Conversaciones con clientes: modelo más capaz; si no está disponible, OpenRouter usa MODEL automáticamente
-const MODEL_CLIENTES = process.env.MODEL_CLIENTES || 'anthropic/claude-sonnet-4.5';
+const MODEL_CLIENTES = process.env.MODEL_CLIENTES || ''; // ej. 'anthropic/claude-sonnet-4.5' (≈10x más caro); vacío = usa MODEL
 const MODELOS_GRATIS = (process.env.MODELOS_GRATIS || 'google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free').split(',').map(x => x.trim()).filter(Boolean);
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_VERSION || 'v25.0'}`;
 const CRON_SECRET = process.env.CRON_SECRET || '';
