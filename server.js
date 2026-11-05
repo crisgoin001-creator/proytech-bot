@@ -16,6 +16,8 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'proytech_secure_verify_token';
 const APP_SECRET = process.env.APP_SECRET || '';            // opcional: valida firma de Meta
 const ADMIN_PHONE = process.env.ADMIN_PHONE || '51993186475'; // recibe alertas de derivación
 const MODEL = process.env.MODEL || 'anthropic/claude-haiku-4.5';
+// Conversaciones con clientes: modelo más capaz; si no está disponible, OpenRouter usa MODEL automáticamente
+const MODEL_CLIENTES = process.env.MODEL_CLIENTES || 'anthropic/claude-sonnet-4.5';
 const MODELOS_GRATIS = (process.env.MODELOS_GRATIS || 'google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free').split(',').map(x => x.trim()).filter(Boolean);
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_VERSION || 'v25.0'}`;
 const CRON_SECRET = process.env.CRON_SECRET || '';
@@ -82,15 +84,48 @@ async function guardarSesion(s) {
   await db.guardarLead(s);
 }
 
+const esperar = ms => new Promise(r => setTimeout(r, ms));
+// Marca el mensaje del cliente como leído y muestra "escribiendo…" (WhatsApp lo mantiene hasta 25 s o hasta la respuesta)
+async function mostrarEscribiendo(msgId) {
+  if (!msgId) return;
+  try {
+    await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', status: 'read', message_id: msgId, typing_indicator: { type: 'text' } },
+      { timeout: 8000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+  } catch (e) { console.error('Indicador escribiendo:', e.response?.data?.error?.message || e.message); }
+}
+// Divide un texto largo en burbujas naturales (por párrafos), máx. 3
+function enBurbujas(texto) {
+  if (texto.length <= 450) return [texto];
+  const parr = texto.split(/\n\s*\n/).map(x => x.trim()).filter(Boolean);
+  const out = []; let cur = '';
+  for (const p of parr) { if (cur && (cur + '\n\n' + p).length > 700) { out.push(cur); cur = p; } else cur = cur ? cur + '\n\n' + p : p; }
+  if (cur) out.push(cur);
+  while (out.length > 3) { const ult = out.pop(); out[out.length - 1] += '\n\n' + ult; }
+  return out;
+}
+const PAUSA_HUMANA = process.env.PAUSA_HUMANA !== 'no';
 async function enviarYRegistrar(s, textoOriginal) {
   const texto = formatearParaCliente(textoOriginal);
-  const ok = await enviarWhatsApp(s.tel, texto);
-  if (ok) {
-    s.historial.push({ role: 'assistant', content: texto });
-    if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
-    await db.guardarMensaje(s.tel, 'assistant', texto);
+  const partes = enBurbujas(texto);
+  let okTodo = false;
+  for (const [i, parte] of partes.entries()) {
+    if (PAUSA_HUMANA && s.tel !== ADMIN_PHONE) {
+      // ~ velocidad de una persona escribiendo rápido en el celular: 2.5 s + 25 ms por carácter (máx. 9 s), menos lo ya esperado
+      const objetivo = Math.min(9000, 2500 + parte.length * 25);
+      const yaEspero = i === 0 && s.inicioRespuesta ? Date.now() - s.inicioRespuesta : 0;
+      if (i > 0) await mostrarEscribiendo(s.ultimoMsgId);
+      if (objetivo - yaEspero > 0) await esperar(objetivo - yaEspero);
+    }
+    const ok = await enviarWhatsApp(s.tel, parte);
+    if (ok) {
+      okTodo = true;
+      s.historial.push({ role: 'assistant', content: parte });
+      if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
+      await db.guardarMensaje(s.tel, 'assistant', parte);
+    }
   }
-  return ok;
+  s.inicioRespuesta = null;
+  return okTodo;
 }
 
 // ---------- Detección de origen y línea ----------
@@ -114,7 +149,16 @@ function detectarLinea(texto) {
 }
 
 // ---------- Prompt ----------
-const ESTILO = `ESTILO OBLIGATORIO
+const ESTILO = `CÓMO PIENSAS Y RESPONDES (lo más importante)
+- Eres una persona experta de ProyTech conversando por WhatsApp, no un formulario. Antes de responder, lee TODA la conversación y entiende qué quiere el cliente en su ÚLTIMO mensaje.
+- Responde primero exactamente lo que preguntó o pidió, con datos concretos. Después, si hace falta, UNA sola pregunta útil para avanzar.
+- Escribe como habla un profesional peruano por WhatsApp: frases cortas, naturales, sin sonar a folleto ni a guion. Por defecto 1 a 3 frases. Solo el detalle técnico del curso (cuando lo piden) puede ser más largo.
+- No repitas información que ya diste, no vuelvas a saludar, no copies frases de mensajes anteriores.
+- Nunca preguntes algo que el cliente ya respondió ni algo que no tenga que ver con lo que pidió. Si no entiendes su mensaje, pregunta breve y directo qué necesita.
+- Mantén la línea de la conversación: si consulta por SERVICIOS de ingeniería, no hables del curso; si consulta por el CURSO, no ofrezcas servicios (salvo que él lo pida).
+- Si el cliente manda varios mensajes seguidos, respóndelos juntos en una sola respuesta coherente.
+
+ESTILO OBLIGATORIO
 - Escribes como la asistente comercial de ProyTech Automatización: profesional, cordial y directa. Trato de "usted" salvo que el cliente tutee.
 - Máximo 3 o 4 líneas. Nada de párrafos largos ni relleno. Excepción: cuando piden información del curso o el temario, entrega el detalle técnico completo en viñetas (ver CONOCIMIENTO, punto 0).
 - UNA sola pregunta de perfilamiento por mensaje.
@@ -258,9 +302,9 @@ async function llamarModeloUnaVez(system, mensajes, maxTokens, modelos = null) {
     sys = [{ type: 'text', text: fijo, cache_control: { type: 'ephemeral' } }, { type: 'text', text: variable }];
   }
   const r = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-    ...(gratis ? { models: modelos } : { model: MODEL }),
+    ...(gratis ? { models: modelos } : (MODEL_CLIENTES && MODEL_CLIENTES !== MODEL ? { models: [MODEL_CLIENTES, MODEL] } : { model: MODEL })),
     max_tokens: maxTokens,
-    temperature: 0.3,
+    temperature: 0.4,
     usage: { include: true },
     messages: [{ role: 'system', content: sys }, ...mensajes]
   }, {
@@ -649,6 +693,25 @@ function firmaValida(req) {
   return firma.length === esperada.length && crypto.timingSafeEqual(Buffer.from(firma), Buffer.from(esperada));
 }
 
+// ---------- Agrupación: si el cliente manda varios mensajes seguidos, se espera y se responde a todo junto ----------
+const colas = new Map();
+const ESPERA_AGRUPAR_MS = Number(process.env.ESPERA_AGRUPAR_MS || 6000);
+function encolarMensaje(msg, contacto) {
+  const tel = msg.from || msg.from_user_id;
+  if (!tel || tel === ADMIN_PHONE || msg.type !== 'text') { procesarMensaje(msg, contacto).catch(e => console.error('Error procesando mensaje:', e)); return; }
+  mostrarEscribiendo(msg.id);
+  const c = colas.get(tel) || { msgs: [], contacto, timer: null, inicio: Date.now() };
+  c.msgs.push(msg); c.contacto = contacto || c.contacto;
+  clearTimeout(c.timer);
+  c.timer = setTimeout(() => {
+    colas.delete(tel);
+    const unido = { ...c.msgs[c.msgs.length - 1], text: { body: c.msgs.map(m => m.text?.body || '').filter(Boolean).join('\n') }, _ids: c.msgs.map(m => m.id), _inicio: c.inicio };
+    for (const m of c.msgs.slice(0, -1)) procesados.add(m.id);
+    procesarMensaje(unido, c.contacto).catch(e => console.error('Error procesando mensaje:', e));
+  }, ESPERA_AGRUPAR_MS);
+  colas.set(tel, c);
+}
+
 // ---------- Procesamiento de un mensaje ----------
 async function procesarMensaje(msg, contacto) {
   if (procesados.has(msg.id)) return;
@@ -658,6 +721,7 @@ async function procesarMensaje(msg, contacto) {
   const tel = msg.from || msg.from_user_id; // sin teléfono si el cliente usa nombre de usuario (BSUID)
   if (!tel) { console.error('Mensaje sin remitente:', JSON.stringify(msg).slice(0, 300)); return; }
   const s = await obtenerSesion(tel);
+  s.ultimoMsgId = msg.id; s.inicioRespuesta = msg._inicio || Date.now();
   if (!s.nombre && contacto?.profile?.username) s.nombre = contacto.profile.username;
   if (!s.nombre && contacto?.profile?.name) s.nombre = contacto.profile.name;
 
@@ -991,6 +1055,9 @@ const CASOS_SIM = {
   5: { origen: 'directo', turnos: ['Buenas noches, me pueden dar información?'] },
   6: { origen: 'web_academy', turnos: ['Hola ProyTech Academy, quiero información del curso', 'sí, por favor'] },
   7: { origen: 'web_academy', turnos: ['Hola ProyTech Academy, quiero información del curso', 'sí, envíemelo', 'me interesa más el HMI, trabajo en mantenimiento'] },
+  8: { origen: 'directo', turnos: ['Buenas tardes, qué servicios ofrecen?'] },
+  9: { origen: 'directo', turnos: ['Hola, necesito migrar un PLC S7-300 que tenemos en una línea de envasado', 'Somos una planta de bebidas en Lurín', 'cuánto costaría?'] },
+  10: { origen: 'directo', turnos: ['hola', 'tengo un tablero que se dispara', 'es de una bomba'] },
 };
 let simUso = { t: 0, n: 0 };
 app.get('/salud/simular', async (req, res) => {
@@ -1083,7 +1150,7 @@ app.post('/webhook', (req, res) => {
       const contactos = value.contacts || [];
       for (const msg of value.messages || []) {
         const contacto = contactos.find(c => (msg.from && c.wa_id === msg.from) || (msg.from_user_id && c.user_id === msg.from_user_id)) || contactos[0];
-        procesarMensaje(msg, contacto).catch(e => console.error('Error procesando mensaje:', e));
+        encolarMensaje(msg, contacto);
       }
     }
   }
