@@ -106,6 +106,13 @@ function enBurbujas(texto) {
 }
 const PAUSA_HUMANA = process.env.PAUSA_HUMANA !== 'no';
 const RX_FUGA = /"(linea|intencion|confianza|etapa|consultar_admin|pregunta_admin|borrador|respuesta|resumen_lead)"\s*:|\[Instrucci[oó]n interna|instrucciones que recib|no tengo una indicaci[oó]n|indicaci[oó]n (clara )?de christian|seg[uú]n christian|christian (me )?indic|NO_ENVIAR|consulta #\d|como (modelo|asistente) de (ia|lenguaje)/i;
+function unaPregunta(t) {
+  const txt = String(t || '');
+  const n = (txt.match(/\?/g) || []).length;
+  if (n <= 1) return txt;
+  const i = txt.indexOf('?');
+  return txt.slice(0, i + 1).trim();
+}
 function esSeguroParaCliente(t) { return !!String(t || '').trim() && !RX_FUGA.test(t) && !/^\s*[{\[]/.test(t); }
 async function enviarYRegistrar(s, textoOriginal) {
   const texto = formatearParaCliente(textoOriginal);
@@ -166,6 +173,7 @@ const ESTILO = `CÓMO PIENSAS Y RESPONDES (lo más importante)
 - Mantén la línea de la conversación: si consulta por SERVICIOS de ingeniería, no hables del curso; si consulta por el CURSO, no ofrezcas servicios (salvo que él lo pida).
 - Si el cliente manda varios mensajes seguidos, respóndelos juntos en una sola respuesta coherente.
 - Responde en el idioma del cliente (si escribe en inglés, responde en inglés).
+- Trato de USTED siempre. Solo usa tú si el cliente te tutea explícitamente ("tú", "te", "puedes"); un simple "hola" o "oe" NO es tutear.
 - Solo menciona marcas, normas, servicios y datos que estén en el CONOCIMIENTO. No agregues marcas ni normas por tu cuenta.
 - Máximo UNA pregunta por mensaje (nunca dos preguntas seguidas). En Servicios, si es una falla, después de 2 preguntas ofrece una visita técnica de diagnóstico o una llamada con uno de nuestros ingenieros, en vez de seguir interrogando.
 
@@ -889,6 +897,7 @@ async function procesarMensaje(msg, contacto) {
     return;
   }
 
+  if (out.respuesta) out.respuesta = unaPregunta(out.respuesta);
   if (out.respuesta) await enviarYRegistrar(s, out.respuesta);
   else if (out.intencion === 'error_formato' || out.intencion === 'error_ia') await enviarYRegistrar(s, 'Permítame un momento, por favor, y le confirmo.');
 
@@ -1137,7 +1146,7 @@ async function simular(req, res, casoForzado) {
       s.historial.push({ role: 'user', content: t });
       const out = await consultarClaude(s);
       if (out.linea && ['servicios', 'academy'].includes(out.linea)) s.linea = out.linea;
-      const resp0 = formatearParaCliente(out.respuesta || '');
+      const resp0 = formatearParaCliente(unaPregunta(out.respuesta || ''));
       const resp = esSeguroParaCliente(resp0) ? resp0 : (resp0 ? '🛡️BLOQUEADO: ' + resp0.slice(0, 200) : '(sin respuesta: acuse «Permítame un momento…» + consulta a Christian)');
       s.historial.push({ role: 'assistant', content: resp });
       if (out.enviar_brochure) s.historial.push({ role: 'assistant', content: '[Documento: brochure PDF]' });
