@@ -263,6 +263,7 @@ ESTADO DE LA CONVERSACIÓN
 - Origen del contacto: ${s.origen || 'desconocido'}
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
 - Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
+- Preguntas que ya le hiciste al cliente en esta conversación: ${(s.historial || []).filter(m => m.role === 'assistant' && /\?\s*$/.test(m.content || '')).length}${/(se dispara|falla|parad[ao]|no (prende|arranca|enciende)|alarma|se cay[oó]|emergencia|urgente)/i.test((s.historial || []).filter(m => m.role === 'user').map(m => m.content).join(' ')) ? '\n- ATENCIÓN: el cliente reporta una FALLA. Si ya hiciste 2 o más preguntas, o si dice que la planta/línea está parada, NO hagas más preguntas: ofrece la visita técnica de diagnóstico o la llamada por WhatsApp con uno de nuestros ingenieros y marca consultar_admin=true con el resumen.' : ''}
 `;
 }
 
