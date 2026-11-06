@@ -177,6 +177,13 @@ const ESTILO = `CÓMO PIENSAS Y RESPONDES (lo más importante)
 - Solo menciona marcas, normas, servicios y datos que estén en el CONOCIMIENTO. No agregues marcas ni normas por tu cuenta.
 - Máximo UNA pregunta por mensaje (nunca dos preguntas seguidas). En Servicios, si es una falla, después de 2 preguntas ofrece una visita técnica de diagnóstico o una llamada con uno de nuestros ingenieros, en vez de seguir interrogando.
 
+FOTOS (cuando el cliente envía una imagen)
+- Mírala con atención y responde EN FUNCIÓN de lo que ves, conectado con la conversación. Menciona 1–2 detalles concretos que identificas (marca/modelo de PLC, variador o motor, datos de placa como kW, V, A, RPM, estado del tablero, código de alarma, tipo de plano) para que el cliente sienta que la revisaste.
+- Luego haz UNA pregunta útil según lo que falta (ej. síntoma de la falla, qué quiere lograr, cantidad, plazo).
+- No des diagnósticos definitivos, precios ni instrucciones de reparación peligrosas. En fallas o trabajos en tablero, cierra ofreciendo que uno de nuestros ingenieros lo revise (visita técnica o llamada por WhatsApp).
+- Si la foto está borrosa o no se lee lo importante, pídele con amabilidad otra foto más cercana (ej. de la placa o de la pantalla de alarma). Si no tiene relación con nuestros servicios o el curso, dilo con cortesía y pregunta en qué le podemos ayudar.
+- Nunca inventes datos que no se vean claramente en la foto. Llena "descripcion_foto" con lo que viste.
+
 ESTILO OBLIGATORIO
 - Escribes como la asistente comercial de ProyTech Automatización: profesional, cordial y directa. Trato de "usted" salvo que el cliente tutee.
 - Máximo 3 o 4 líneas. Nada de párrafos largos ni relleno. Excepción: cuando piden información del curso o el temario, entrega el detalle técnico completo en viñetas (ver CONOCIMIENTO, punto 0).
@@ -241,7 +248,7 @@ CUÁNDO CONSULTAR A CHRISTIAN (consultar_admin=true)
 En ese caso: "respuesta" = mensaje breve y natural que mantenga la conversación (ej. "Con gusto, permítame un momento y le confirmo." o una pregunta de perfilamiento útil), SIN decir que consultarás a alguien. "pregunta_admin" = la pregunta concreta para Christian. "borrador" = tu mejor propuesta de respuesta final si puedes armarla, o "".
 
 FORMATO DE SALIDA: ÚNICAMENTE un JSON válido, sin texto adicional:
-{"respuesta":"texto para el cliente","linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"enviar_temario":true|false,"enviar_brochure":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":""}
+{"respuesta":"texto para el cliente","linea":"servicios|academy|personal|indefinida","intencion":"frase corta","confianza":"alta|media|baja","etapa":"nuevo|perfilando|interesado|pensando|objecion|listo|ganado|perdido","consultar_admin":true|false,"pregunta_admin":"","borrador":"","sugerir_llamada":true|false,"motivo_llamada":"","pedir_video":true|false,"enviar_temario":true|false,"enviar_brochure":true|false,"motivo_video":"","nombre_cliente":"","resumen_lead":"","descripcion_foto":"si hubo foto: qué se ve, objetivo y breve (marca, modelo, datos de placa, estado, alarmas); si no, vacío"}
 - Si un cliente que estuvo interesado (pidió precio/fechas o quiso reservar) ahora rechaza o se enfría por precio u otra objeción: cierra con cordialidad y marca sugerir_llamada=true (Christian intentará el último empujón).
 - sugerir_llamada=true si una llamada de Christian aumentaría claramente la probabilidad de cierre (duda compleja, objeción que se repite, cliente corporativo, proyecto grande, cliente indeciso pero muy interesado).
 - pedir_video=true (solo ACADEMY, una vez por cliente) si ver el laboratorio ayudaría a cerrar: duda de la calidad, los equipos o el lugar; no puede venir a la visita; pide fotos o videos; o está "pensando" tras conocer el precio. En la respuesta al cliente di con naturalidad que en un momento le compartes un video corto del laboratorio. motivo_video = por qué le ayudaría (máx. 1 línea).
@@ -352,10 +359,14 @@ async function llamarModeloUnaVez(system, mensajes, maxTokens, modelos = null) {
   return r.data.choices?.[0]?.message?.content || '';
 }
 
-async function consultarClaude(s) {
+async function consultarClaude(s, imagen = null) {
+  // Con foto: el último mensaje del cliente se envía al modelo como texto + imagen (el historial guarda solo texto)
+  const hist = imagen ? [...s.historial.slice(0, -1), { role: 'user', content: [
+    { type: 'text', text: `${s.historial[s.historial.length - 1]?.content || ''}\n[El cliente envió esta FOTO. Analízala según la sección FOTOS.]` },
+    { type: 'image_url', image_url: { url: imagen } }] }] : s.historial;
   for (let intento = 1; intento <= 2; intento++) {
     const extra = intento === 2 ? [{ role: 'user', content: '[Instrucción interna] Tu salida anterior no fue un JSON válido. Devuelve SOLO el JSON, breve (pregunta_admin y borrador de máximo 2 frases), empezando por "respuesta".' }] : [];
-    const crudo = '{' + await llamarModelo(construirPrompt(s), [...s.historial, ...extra, { role: 'assistant', content: '{' }], 1200);
+    const crudo = '{' + await llamarModelo(construirPrompt(s), [...hist, ...extra, { role: 'assistant', content: '{' }], 1200);
     const out = extraerJSON(crudo);
     if (out && typeof out.respuesta === 'string') return out;
     // JSON cortado o mal escapado: rescatar al menos la respuesta y los campos clave
@@ -783,6 +794,14 @@ function firmaValida(req) {
   return firma.length === esperada.length && crypto.timingSafeEqual(Buffer.from(firma), Buffer.from(esperada));
 }
 
+// Descarga una imagen de WhatsApp y la devuelve como data URL (máx. 5 MB)
+async function descargarImagenWA(mediaId) {
+  const meta = (await axios.get(`${GRAPH}/${mediaId}`, { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } })).data;
+  if (!meta?.url || meta.file_size > 5 * 1024 * 1024) return null;
+  const bin = await axios.get(meta.url, { responseType: 'arraybuffer', timeout: 20000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+  return `data:${meta.mime_type || 'image/jpeg'};base64,${Buffer.from(bin.data).toString('base64')}`;
+}
+
 // ---------- Agrupación: si el cliente manda varios mensajes seguidos, se espera y se responde a todo junto ----------
 const colas = new Map();
 const ESPERA_AGRUPAR_MS = Number(process.env.ESPERA_AGRUPAR_MS || 6000);
@@ -819,12 +838,16 @@ async function procesarMensaje(msg, contacto) {
   if (msg.type !== 'text') {
     const t = msg.type === 'interactive' ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title)
       : msg.type === 'button' ? msg.button?.text : null; // botones de respuesta rápida de plantillas
-    if (!t) {
+    if (!t && msg.type === 'image' && msg.image?.id && tel !== ADMIN_PHONE) {
+      try { msg._imagen = await descargarImagenWA(msg.image.id); } catch (e) { console.error('Descarga de imagen:', e.response?.status || e.message); }
+      if (msg._imagen) msg.text = { body: (msg.image.caption || '').trim() || '[Foto]' };
+    }
+    if (!t && msg._imagen) { /* foto: sigue el flujo normal con la imagen */ }
+    else if (!t) {
       await enviarWhatsApp(tel, 'Gracias, recibimos su archivo. Para atenderle mejor, ¿podría indicarnos en un mensaje de texto qué necesita?');
       console.log(JSON.stringify({ evento: 'no_texto', tel, tipo: msg.type }));
       return;
-    }
-    msg.text = { body: t };
+    } else msg.text = { body: t };
   }
 
   const texto = (msg.text?.body || '').trim();
@@ -892,7 +915,7 @@ async function procesarMensaje(msg, contacto) {
   if (s.nueva) await guardarSesion(s);
   s.historial.push({ role: 'user', content: texto });
   if (s.historial.length > MAX_HISTORIAL) s.historial = s.historial.slice(-MAX_HISTORIAL);
-  await db.guardarMensaje(tel, 'user', texto);
+  if (!msg._imagen) await db.guardarMensaje(tel, 'user', texto);
 
   if (s.pausadoHasta && Date.now() < s.pausadoHasta) {
     await guardarSesion(s);
@@ -902,7 +925,16 @@ async function procesarMensaje(msg, contacto) {
 
   let out;
   try {
-    out = await consultarClaude(s);
+    out = await consultarClaude(s, msg._imagen || null);
+    if (msg._imagen) {
+      // el historial guarda la descripción de la foto (texto), no la imagen
+      const desc = (out.descripcion_foto || '').trim();
+      const etiqueta = `[Foto del cliente${texto && texto !== '[Foto]' ? ': "' + texto + '"' : ''}]${desc ? ' Se ve: ' + desc : ''}`;
+      s.historial[s.historial.length - 1] = { role: 'user', content: etiqueta };
+      await db.guardarMensaje(tel, 'user', etiqueta);
+      console.log(JSON.stringify({ evento: 'foto_analizada', tel, desc: desc.slice(0, 200) }));
+      if (desc) await enviarWhatsApp(ADMIN_PHONE, `📷 Foto de ${s.nombre || tel}: ${desc.slice(0, 500)}`);
+    }
   } catch (e) {
     console.error('Error OpenRouter:', JSON.stringify(e.response?.data || e.message));
     const sinSaldo = e.response?.status === 402;
@@ -1166,7 +1198,13 @@ app.post('/salud/simular', async (req, res) => {
   if (new Date().toISOString().slice(0, 10) > SIM_LIBRE_HASTA) return res.status(403).json({ error: 'pruebas libres deshabilitadas' });
   const turnos = (req.body?.turnos || []).slice(0, 6).map(t => String(t).slice(0, 600));
   if (!turnos.length) return res.status(400).json({ error: 'faltan turnos' });
-  CASOS_SIM.libre = { origen: req.body.origen || 'directo', turnos };
+  let imagen = null;
+  if (req.body.imagen_url) {
+    try { const b = await axios.get(String(req.body.imagen_url), { responseType: 'arraybuffer', timeout: 20000, headers: { 'User-Agent': 'ProyTechBot/1.0 (simulacion)' } });
+      imagen = `data:${b.headers['content-type'] || 'image/jpeg'};base64,${Buffer.from(b.data).toString('base64')}`; }
+    catch (e) { return res.status(400).json({ error: 'no pude descargar la imagen: ' + (e.response?.status || e.message) }); }
+  }
+  CASOS_SIM.libre = { origen: req.body.origen || 'directo', turnos, imagen, imagenEn: Number.isInteger(req.body.imagen_en) ? req.body.imagen_en : turnos.length - 1 };
   return simular(req, res, 'libre');
 });
 app.get('/salud/simular', (req, res) => simular(req, res));
@@ -1179,15 +1217,17 @@ async function simular(req, res, casoForzado) {
   const s = sesionNueva('SIMULACION'); s.origen = c.origen; s.linea = detectarLinea(c.turnos[0]);
   const pasos = [];
   try {
-    for (const t of c.turnos) {
+    for (const [ti, t] of c.turnos.entries()) {
       s.historial.push({ role: 'user', content: t });
-      const out = await consultarClaude(s);
+      const img = c.imagen && ti === c.imagenEn ? c.imagen : null;
+      const out = await consultarClaude(s, img);
+      if (img) s.historial[s.historial.length - 1] = { role: 'user', content: `[Foto del cliente] Se ve: ${out.descripcion_foto || ''}` };
       if (out.linea && ['servicios', 'academy'].includes(out.linea)) s.linea = out.linea;
       const resp0 = formatearParaCliente(unaPregunta(out.respuesta || ''));
       const resp = esSeguroParaCliente(resp0) ? resp0 : (resp0 ? '🛡️BLOQUEADO: ' + resp0.slice(0, 200) : '(sin respuesta: acuse «Permítame un momento…» + consulta a Christian)');
       s.historial.push({ role: 'assistant', content: resp });
       if (out.enviar_brochure) s.historial.push({ role: 'assistant', content: '[Documento: brochure PDF]' });
-      pasos.push({ cliente: t, bot: resp, linea: out.linea, etapa: out.etapa, enviar_brochure: !!out.enviar_brochure, enviar_temario: !!out.enviar_temario, consultar_admin: !!out.consultar_admin, pregunta_admin: out.pregunta_admin || '' });
+      pasos.push({ cliente: t, bot: resp, linea: out.linea, etapa: out.etapa, enviar_brochure: !!out.enviar_brochure, enviar_temario: !!out.enviar_temario, consultar_admin: !!out.consultar_admin, pregunta_admin: out.pregunta_admin || '', descripcion_foto: out.descripcion_foto || '' });
     }
     res.json({ caso, pasos });
   } catch (e) { res.json({ error: e.response?.data?.error?.message || e.message, pasos }); }
