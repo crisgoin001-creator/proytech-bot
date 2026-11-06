@@ -419,7 +419,7 @@ const esTelefono = id => /^\d{6,16}$/.test(String(id || ''));
 const destino = id => (esTelefono(id) ? { to: id } : { recipient: id });
 
 async function enviarDocumento(to, link, filename, caption) {
-  if (MODO_SUPERVISADO && to !== ADMIN_PHONE) { await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviado a ${to}: documento ${filename}`); return false; }
+  if (MODO_SUPERVISADO && to !== ADMIN_PHONE && !aprobados.has(to)) { await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviado a ${to}: documento ${filename}`); return false; }
   try {
     await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: 'whatsapp', ...destino(to), type: 'document', document: { link, filename, caption } },
@@ -438,7 +438,7 @@ async function ventanaAdminAbierta() {
   if (!ultimoAdminTs) { const l = await db.cargarLead(ADMIN_PHONE); ultimoAdminTs = l?.ultimo_cliente ? Date.parse(l.ultimo_cliente) : 1; }
   return Date.now() - ultimoAdminTs < 23 * HORA;
 }
-let envioAprobado = false;   // true solo mientras se envía algo aprobado por Christian
+const aprobados = new Set();  // clientes con envío aprobado en este momento (por chat, nunca global)
 async function enviarWhatsApp(to, body) {
   if (!to) { console.error('enviarWhatsApp sin destinatario'); return false; }
   if (to === ADMIN_PHONE && !(await ventanaAdminAbierta())) {
@@ -453,7 +453,7 @@ async function enviarWhatsApp(to, body) {
       return true;
     } catch (e) { console.error('Error aviso_admin:', JSON.stringify(e.response?.data || e.message)); return false; }
   }
-  if (MODO_SUPERVISADO && to !== ADMIN_PHONE && !envioAprobado) {
+  if (MODO_SUPERVISADO && to !== ADMIN_PHONE && !aprobados.has(to)) {
     const r = retenidos.get(to) || []; r.push(String(body)); retenidos.set(to, r.slice(-3));
     console.log(JSON.stringify({ evento: 'supervisado_retenido', to, texto: String(body).slice(0, 200) }));
     await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviado a ${esTelefono(to) ? '+' + to : to}:\n"${String(body).slice(0, 900)}"\n\nPara enviarlo tal cual: */enviar ${to}*`);
@@ -695,8 +695,8 @@ async function procesarComandoAdmin(texto) {
   if (me) {
     const textos = retenidos.get(me[1]) || [];
     if (!textos.length) { await enviarWhatsApp(ADMIN_PHONE, `No tengo borradores retenidos para ${me[1]}.`); return true; }
-    const sx = await obtenerSesion(me[1]); envioAprobado = true;
-    try { for (const tx of textos) await enviarYRegistrar(sx, tx); } finally { envioAprobado = false; }
+    const sx = await obtenerSesion(me[1]); aprobados.add(me[1]);
+    try { for (const tx of textos) await enviarYRegistrar(sx, tx); } finally { aprobados.delete(me[1]); }
     retenidos.delete(me[1]);
     await enviarWhatsApp(ADMIN_PHONE, `✅ Enviado a ${me[1]} (${textos.length} mensaje${textos.length > 1 ? 's' : ''}).`); return true;
   }
@@ -967,6 +967,13 @@ async function procesarMensaje(msg, contacto) {
   }
 
   if (out.respuesta) out.respuesta = unaPregunta(out.respuesta);
+  // Modo supervisado: las consultas de INFORMES se responden solas (aprobado por Christian el 06-nov); lo demás espera su aprobación
+  const RX_INFORMES = /(informaci[oó]n|informes?\b|\binfo\b|detalles?|m[aá]s datos|precio|costo|cu[aá]nto (cuesta|sale|es|vale)|temario|m[oó]dulos|contenido del curso|horarios?|fechas?|cu[aá]ndo (empieza|inicia)|duraci[oó]n|brochure|folleto|pdf|ubicaci[oó]n|d[oó]nde (quedan|est[aá]n)|modalidad|certificad|requisit|qu[eé] (servicios|hacen|ofrecen)|curso|capacitaci[oó]n)/i;
+  const primerContacto = (s.historial || []).filter(m => m.role === 'assistant').length === 0;
+  const respondeOfertaBrochure = /brochure/i.test([...(s.historial || [])].reverse().find(m => m.role === 'assistant')?.content || '') && /^(s[ií]|ok|claro|por favor|dale|ya|bueno|env[ií]e|m[aá]nde)/i.test(texto);
+  const autoInformes = MODO_SUPERVISADO && !msg._imagen && !out.consultar_admin && (RX_INFORMES.test(texto) || primerContacto || respondeOfertaBrochure);
+  if (autoInformes) { aprobados.add(tel); console.log(JSON.stringify({ evento: 'auto_informes', tel })); }
+  try {
   if (out.respuesta) await enviarYRegistrar(s, out.respuesta);
   else if (out.intencion === 'error_formato' || out.intencion === 'error_ia') await enviarYRegistrar(s, 'Permítame un momento, por favor, y le confirmo.');
 
@@ -994,6 +1001,7 @@ async function procesarMensaje(msg, contacto) {
       await db.guardarMensaje(tel, 'assistant', '[Documento: temario PDF]');
     }
   }
+  } finally { if (autoInformes) aprobados.delete(tel); }
 
   if (out.etapa) s.etapa = out.etapa;
   // un lead comercial que ya recibió respuesta entra al embudo de seguimiento
@@ -1028,7 +1036,7 @@ async function procesarMensaje(msg, contacto) {
 // Paso 1 (~20 h): mensaje libre redactado por Claude (dentro de la ventana de 24 h, gratis).
 // Paso 2 (día 3) y paso 3 (día 7): plantilla aprobada por Meta. Sin plantilla → te aviso para hacerlo a mano.
 async function enviarPlantilla(tel, nombrePlantilla, nombreCliente, extras = []) {
-  if (MODO_SUPERVISADO && tel !== ADMIN_PHONE) { await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviada plantilla ${nombrePlantilla} a ${tel}`); return false; }
+  if (MODO_SUPERVISADO && tel !== ADMIN_PHONE && !aprobados.has(tel)) { await enviarWhatsApp(ADMIN_PHONE, `🔇 *Modo supervisado* — NO enviada plantilla ${nombrePlantilla} a ${tel}`); return false; }
   try {
     await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp', ...destino(tel), type: 'template',
@@ -1360,8 +1368,8 @@ async function enviarRespuestasAprobadas() {
     try {
       const ult = await db.cargarMensajes(r.tel, 1);
       if (!ult.length || ult[ult.length - 1].role !== 'user') continue; // ya respondido o sin chat: no se envía nada
-      const sx = await obtenerSesion(r.tel); envioAprobado = true;
-      try { if (await enviarYRegistrar(sx, r.texto)) await enviarWhatsApp(ADMIN_PHONE, `✅ Respondí a ${sx.nombre || r.tel} (aprobado):\n"${r.texto.slice(0, 300)}"`); } finally { envioAprobado = false; }
+      const sx = await obtenerSesion(r.tel); aprobados.add(r.tel);
+      try { if (await enviarYRegistrar(sx, r.texto)) await enviarWhatsApp(ADMIN_PHONE, `✅ Respondí a ${sx.nombre || r.tel} (aprobado):\n"${r.texto.slice(0, 300)}"`); } finally { aprobados.delete(r.tel); }
     } catch (e) { console.error('Respuesta aprobada', r.tel, e.message); }
   }
 }
