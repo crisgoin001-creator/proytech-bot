@@ -439,6 +439,7 @@ async function ventanaAdminAbierta() {
   return Date.now() - ultimoAdminTs < 23 * HORA;
 }
 const aprobados = new Set();  // clientes con envío aprobado en este momento (por chat, nunca global)
+const aprobadosManual = new Set(); // envíos ordenados por Christian con /enviar o /r (pueden ir aunque el chat esté en pausa)
 async function enviarWhatsApp(to, body) {
   if (!to) { console.error('enviarWhatsApp sin destinatario'); return false; }
   if (to === ADMIN_PHONE && !(await ventanaAdminAbierta())) {
@@ -452,6 +453,10 @@ async function enviarWhatsApp(to, body) {
       console.log('Aviso a Christian por plantilla (ventana cerrada):', resumen.slice(0, 120));
       return true;
     } catch (e) { console.error('Error aviso_admin:', JSON.stringify(e.response?.data || e.message)); return false; }
+  }
+  if (to !== ADMIN_PHONE && !aprobadosManual.has(to)) {
+    const sx = sesiones.get(to);
+    if (sx?.pausadoHasta && sx.pausadoHasta > Date.now()) { console.log(JSON.stringify({ evento: 'bloqueado_chat_atendido', to })); return false; }
   }
   if (MODO_SUPERVISADO && to !== ADMIN_PHONE && !aprobados.has(to)) {
     const r = retenidos.get(to) || []; r.push(String(body)); retenidos.set(to, r.slice(-3));
@@ -602,7 +607,9 @@ async function responderManual(tel, texto, avisar) {
   const s = await obtenerSesion(tel);
   if (s.nueva) await guardarSesion(s);
   const ctx = ultimoMensajeCliente(s);
-  const ok = await enviarYRegistrar(s, texto);
+  aprobados.add(tel); aprobadosManual.add(tel);
+  let ok = false;
+  try { ok = await enviarYRegistrar(s, texto); } finally { aprobados.delete(tel); aprobadosManual.delete(tel); }
   if (ok) await registrarEjemplo(s, ctx, texto, 'comando_r');
   if (ok) { s.pausadoHasta = Date.now() + PAUSA_HORAS * HORA; await guardarSesion(s); }
   if (avisar) await enviarWhatsApp(ADMIN_PHONE, ok ? `✅ Enviado a +${tel}. Bot en pausa ${PAUSA_HORAS} h en ese chat (reactiva con /bot ${tel}).` : `⚠️ No se pudo enviar a +${tel}.`);
@@ -695,8 +702,8 @@ async function procesarComandoAdmin(texto) {
   if (me) {
     const textos = retenidos.get(me[1]) || [];
     if (!textos.length) { await enviarWhatsApp(ADMIN_PHONE, `No tengo borradores retenidos para ${me[1]}.`); return true; }
-    const sx = await obtenerSesion(me[1]); aprobados.add(me[1]);
-    try { for (const tx of textos) await enviarYRegistrar(sx, tx); } finally { aprobados.delete(me[1]); }
+    const sx = await obtenerSesion(me[1]); aprobados.add(me[1]); aprobadosManual.add(me[1]);
+    try { for (const tx of textos) await enviarYRegistrar(sx, tx); } finally { aprobados.delete(me[1]); aprobadosManual.delete(me[1]); }
     retenidos.delete(me[1]);
     await enviarWhatsApp(ADMIN_PHONE, `✅ Enviado a ${me[1]} (${textos.length} mensaje${textos.length > 1 ? 's' : ''}).`); return true;
   }
@@ -768,7 +775,10 @@ async function procesarComandoAdmin(texto) {
   }
   if (!final) { await enviarWhatsApp(ADMIN_PHONE, `⚠️ No pude redactar #${id}. Reintenta con otra indicación o escribe: #${id} ok`); return true; }
   const ctxCliente = ultimoMensajeCliente(s);
-  if (await enviarYRegistrar(s, final)) {
+  aprobados.add(p.tel); aprobadosManual.add(p.tel);
+  let enviadoOk = false;
+  try { enviadoOk = await enviarYRegistrar(s, final); } finally { aprobados.delete(p.tel); aprobadosManual.delete(p.tel); }
+  if (enviadoOk) {
     await registrarEjemplo(s, ctxCliente, final, 'consulta');
     s.pendiente = null; pendientes.delete(id); await db.cerrarConsulta(id);
     s.proximoSeguimiento = Date.now() + PRIMER_SEG_MIN * 60000;
@@ -1359,23 +1369,7 @@ app.get('/salud/plantillas', async (_req, res) => {
   catch (e) { res.json({ error: e.response?.data?.error?.message || e.message }); }
 });
 
-const RESPUESTAS_APROBADAS = [
-  { tel: '51949165809', texto: 'Buenos días, gracias por escribir a ProyTech Automatización. Con gusto le ayudo.\n\n¿Su consulta es por un servicio de ingeniería para su empresa (tableros eléctricos y de control, automatización con PLC/HMI o migraciones) o por nuestro curso de PLC Siemens?' },
-  { tel: '51907189492', texto: 'Buenos días, Angie, gracias por escribirnos. En ProyTech nos dedicamos a la automatización industrial: tableros eléctricos y de control, programación de PLC/HMI y capacitación técnica.\n\n¿Las mesas que busca son para uso industrial, por ejemplo una mesa o banco de trabajo con tablero o equipos eléctricos integrados? Así le confirmo si podemos ayudarle.' },
-];
-async function enviarRespuestasAprobadas() {
-  for (const r of RESPUESTAS_APROBADAS) {
-    try {
-      const ult = await db.cargarMensajes(r.tel, 1);
-      if (!ult.length || ult[ult.length - 1].role !== 'user') continue; // ya respondido o sin chat: no se envía nada
-      const sx = await obtenerSesion(r.tel); aprobados.add(r.tel);
-      try { if (await enviarYRegistrar(sx, r.texto)) await enviarWhatsApp(ADMIN_PHONE, `✅ Respondí a ${sx.nombre || r.tel} (aprobado):\n"${r.texto.slice(0, 300)}"`); } finally { aprobados.delete(r.tel); }
-    } catch (e) { console.error('Respuesta aprobada', r.tel, e.message); }
-  }
-}
-
 app.listen(PORT, async () => {
-  setTimeout(() => enviarRespuestasAprobadas(), 20000);
   setTimeout(() => asegurarPlantillas(), 5000);
   console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
   const datos = await db.cargarDatos();
