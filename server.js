@@ -477,7 +477,7 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
-const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /info 51XXXXXXXXX — enviar detalle técnico + brochure de Academy\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /responder 51XXXXXXXXX — el bot responde ahora un mensaje que quedó sin respuesta\n• /info 51XXXXXXXXX — enviar detalle técnico + brochure de Academy\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
 
 // Revisa el correo de la empresa y convierte compromisos con fecha en plazos del calendario
 async function revisarCorreos(horas = 3) {
@@ -699,6 +699,8 @@ async function procesarComandoAdmin(texto) {
     return true;
   }
   if (/^\/status$/i.test(t)) { await enviarStatus(); return true; }
+  const mres = t.match(/^\/responder\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)$/i);
+  if (mres) { const r = await responderPendiente(mres[1], true); await enviarWhatsApp(ADMIN_PHONE, r); return true; }
   const me = t.match(/^\/enviar\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)$/i);
   if (me) {
     const textos = retenidos.get(me[1]) || [];
@@ -803,6 +805,24 @@ function firmaValida(req) {
   const firma = req.get('x-hub-signature-256') || '';
   const esperada = 'sha256=' + crypto.createHmac('sha256', APP_SECRET).update(req.rawBody || '').digest('hex');
   return firma.length === esperada.length && crypto.timingSafeEqual(Buffer.from(firma), Buffer.from(esperada));
+}
+
+// Responde el último mensaje de un cliente que quedó sin respuesta (por orden de Christian o envío puntual seguro)
+async function responderPendiente(tel, ordenChristian = false) {
+  const s = await obtenerSesion(tel);
+  const ult = s.historial[s.historial.length - 1];
+  if (!ult || ult.role !== 'user') return `No hay mensaje pendiente de ${tel}: el último del chat ya es nuestro.`;
+  if (!ordenChristian && s.pausadoHasta && s.pausadoHasta > Date.now()) return `Chat ${tel} en pausa (lo atiendes tú): no respondo.`;
+  const out = await consultarClaude(s);
+  const resp = unaPregunta(out.respuesta || '');
+  if (!resp) return `⚠️ No pude redactar la respuesta para ${tel}.`;
+  aprobados.add(tel); if (ordenChristian) aprobadosManual.add(tel);
+  let ok = false;
+  try { ok = await enviarYRegistrar(s, resp); } finally { aprobados.delete(tel); aprobadosManual.delete(tel); }
+  if (out.linea && ['servicios', 'academy'].includes(out.linea)) s.linea = out.linea;
+  if (s.etapa === 'nuevo' && s.linea) s.etapa = 'perfilando';
+  await guardarSesion(s);
+  return ok ? `✅ Respondí a ${s.nombre || tel}:\n"${resp.slice(0, 400)}"` : `⚠️ No se pudo enviar a ${tel}.`;
 }
 
 // Descarga una imagen de WhatsApp y la devuelve como data URL (máx. 5 MB)
@@ -1372,6 +1392,16 @@ app.get('/salud/plantillas', async (_req, res) => {
 });
 
 app.listen(PORT, async () => {
+  setTimeout(async () => {
+    for (const tel of ['51954213367']) {
+      try {
+        const msgs = await db.cargarMensajes(tel, 5);
+        if (msgs.length !== 1 || msgs[0].role !== 'user') continue; // ya hay respuesta o más mensajes: no se toca
+        const r = await responderPendiente(tel, false);
+        await enviarWhatsApp(ADMIN_PHONE, r);
+      } catch (e) { console.error('Pendiente', tel, e.message); }
+    }
+  }, 20000);
   setTimeout(() => asegurarPlantillas(), 5000);
   console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
   const datos = await db.cargarDatos();
