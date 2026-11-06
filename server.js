@@ -421,9 +421,27 @@ async function enviarDocumento(to, link, filename, caption) {
 // MODO SUPERVISADO: mientras esté activo, el bot NO escribe a clientes; reenvía a Christian lo que habría dicho
 const MODO_SUPERVISADO = process.env.MODO_SUPERVISADO !== 'no';
 const retenidos = new Map(); // tel -> [textos que el bot habría enviado]
+let ultimoAdminTs = 0;        // última vez que Christian escribió al 972 (abre la ventana de 24 h)
+const avisosPendientesAdmin = []; // avisos que no pudieron entregarse por la ventana cerrada
+async function ventanaAdminAbierta() {
+  if (!ultimoAdminTs) { const l = await db.cargarLead(ADMIN_PHONE); ultimoAdminTs = l?.ultimo_cliente ? Date.parse(l.ultimo_cliente) : 1; }
+  return Date.now() - ultimoAdminTs < 23 * HORA;
+}
 let envioAprobado = false;   // true solo mientras se envía algo aprobado por Christian
 async function enviarWhatsApp(to, body) {
   if (!to) { console.error('enviarWhatsApp sin destinatario'); return false; }
+  if (to === ADMIN_PHONE && !(await ventanaAdminAbierta())) {
+    // Ventana cerrada: WhatsApp descartaría el texto libre. Se guarda y se avisa con plantilla.
+    avisosPendientesAdmin.push(String(body)); if (avisosPendientesAdmin.length > 30) avisosPendientesAdmin.shift();
+    const resumen = String(body).replace(/[\n\t]+/g, ' · ').replace(/ {4,}/g, ' ').replace(/\*/g, '').slice(0, 300);
+    try {
+      await axios.post(`${GRAPH}/${PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', to: ADMIN_PHONE, type: 'template',
+        template: { name: 'aviso_admin', language: { code: TEMPLATE_LANG }, components: [{ type: 'body', parameters: [{ type: 'text', text: resumen }] }] } },
+        { timeout: 15000, headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+      console.log('Aviso a Christian por plantilla (ventana cerrada):', resumen.slice(0, 120));
+      return true;
+    } catch (e) { console.error('Error aviso_admin:', JSON.stringify(e.response?.data || e.message)); return false; }
+  }
   if (MODO_SUPERVISADO && to !== ADMIN_PHONE && !envioAprobado) {
     const r = retenidos.get(to) || []; r.push(String(body)); retenidos.set(to, r.slice(-3));
     console.log(JSON.stringify({ evento: 'supervisado_retenido', to, texto: String(body).slice(0, 200) }));
@@ -814,6 +832,12 @@ async function procesarMensaje(msg, contacto) {
 
   // Comandos del administrador (#id respuesta, /pendientes, /datos, /reset)
   if (tel === ADMIN_PHONE) {
+    ultimoAdminTs = Date.now(); s.ultimoCliente = Date.now(); await guardarSesion(s);
+    if (avisosPendientesAdmin.length) {
+      const lista = avisosPendientesAdmin.splice(0);
+      await enviarWhatsApp(ADMIN_PHONE, `📬 Tenías ${lista.length} aviso(s) pendiente(s):`);
+      for (const a of lista) await enviarWhatsApp(ADMIN_PHONE, a);
+    }
     if (texto.toLowerCase() === '/reset') {
       sesiones.delete(tel); await db.borrarLead(tel); await db.cerrarConsultasDe(tel);
       for (const [k, p] of pendientes) if (p.tel === tel) pendientes.delete(k);
@@ -1236,6 +1260,9 @@ app.post('/webhook', (req, res) => {
       }
       if (change.field && change.field !== 'messages') continue; // history / smb_app_state_sync: se ignoran
       const contactos = value.contacts || [];
+      for (const st of value.statuses || []) {
+        if (st.status === 'failed') console.error(JSON.stringify({ evento: 'entrega_fallida', to: st.recipient_id || st.recipient_user_id, error: st.errors?.[0]?.code, detalle: st.errors?.[0]?.title || st.errors?.[0]?.message }));
+      }
       for (const msg of value.messages || []) {
         const contacto = contactos.find(c => (msg.from && c.wa_id === msg.from) || (msg.from_user_id && c.user_id === msg.from_user_id)) || contactos[0];
         encolarMensaje(msg, contacto);
@@ -1253,6 +1280,9 @@ const PLANTILLAS = [
   { name: 'ultimos_cupos_academy', category: 'MARKETING', language: 'es', components: [{ type: 'BODY',
     text: 'Hola {{1}}, quedan pocas vacantes para el curso PLC Siemens que inicia el sábado {{2}} en nuestro laboratorio de Surquillo (máximo 2 alumnos por estación). Puede separar la suya con S/ 200, con la garantía de que si el grupo no se abre se le reembolsa el 100 %. ¿Le reservamos un lugar?',
     example: { body_text: [['Juan', '14 de noviembre']] } }, { type: 'FOOTER', text: 'Responda NO si no desea más mensajes' }] },
+  { name: 'aviso_admin', category: 'UTILITY', language: 'es', components: [{ type: 'BODY',
+    text: 'Aviso del asistente de ProyTech: {{1}}. Responda a este mensaje para ver el detalle completo.',
+    example: { body_text: [['Nuevo cliente consultó por el curso de PLC (+51 999 999 999)']] } }] },
   { name: 'seguimiento_dia3', category: 'UTILITY', language: 'es', components: [{ type: 'BODY',
     text: 'Hola {{1}}, le escribimos de ProyTech Automatización para saber si pudo revisar la información sobre su consulta. Quedamos atentos para resolver cualquier duda.',
     example: { body_text: [['Juan']] } }] },
