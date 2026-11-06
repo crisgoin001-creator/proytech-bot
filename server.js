@@ -1392,16 +1392,6 @@ app.get('/salud/plantillas', async (_req, res) => {
 });
 
 app.listen(PORT, async () => {
-  setTimeout(async () => {
-    for (const tel of ['51954213367']) {
-      try {
-        const msgs = await db.cargarMensajes(tel, 5);
-        if (msgs.length !== 1 || msgs[0].role !== 'user') continue; // ya hay respuesta o más mensajes: no se toca
-        const r = await responderPendiente(tel, false);
-        await enviarWhatsApp(ADMIN_PHONE, r);
-      } catch (e) { console.error('Pendiente', tel, e.message); }
-    }
-  }, 20000);
   setTimeout(() => asegurarPlantillas(), 5000);
   console.log(`ProyTech Bot v3 corriendo en el puerto ${PORT} · BD ${db.activo ? 'Supabase' : 'RAM'}`);
   const datos = await db.cargarDatos();
