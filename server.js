@@ -270,6 +270,7 @@ ESTADO DE LA CONVERSACIÓN
 - Origen del contacto: ${s.origen || 'desconocido'}
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
 - Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
+- Documentos ya enviados en este chat: ${['brochure', 'temario'].filter(d => (s.historial || []).some(m => new RegExp('\\[Documento: ' + d, 'i').test(m.content || ''))).join(', ') || 'ninguno'}. Si vuelve a pedir uno que ya se envió, dile que se lo enviamos arriba en el chat y pregúntale si le llegó; NO prometas enviarlo de nuevo. Solo si dice que no le llegó, marca enviar_brochure=true.
 - Preguntas que ya le hiciste al cliente en esta conversación: ${(s.historial || []).filter(m => m.role === 'assistant' && /\?\s*$/.test(m.content || '')).length}${/(se dispara|falla|parad[ao]|no (prende|arranca|enciende)|alarma|se cay[oó]|emergencia|urgente)/i.test((s.historial || []).filter(m => m.role === 'user').map(m => m.content).join(' ')) ? '\n- ATENCIÓN: el cliente reporta una FALLA. Si ya hiciste 2 o más preguntas, o si dice que la planta/línea está parada, NO hagas más preguntas: ofrece la visita técnica de diagnóstico o la llamada por WhatsApp con uno de nuestros ingenieros y marca consultar_admin=true con el resumen.' : ''}
 `;
 }
@@ -990,7 +991,8 @@ async function procesarMensaje(msg, contacto) {
   // Brochure en PDF solo si lo pide (y mientras su precio esté vigente); la info igual va en el mensaje
   const BROCHURE_HASTA = process.env.BROCHURE_HASTA || '2026-11-14';
   const yaTieneBrochure = (s.historial || []).some(m => /\[Documento: brochure PDF\]/.test(m.content || ''));
-  if (out.enviar_brochure && !yaTieneBrochure) {
+  const noLlego = /no (me )?(lleg|aparec|veo|abre|carga)/i.test(texto);
+  if (out.enviar_brochure && (!yaTieneBrochure || noLlego)) {
     const hoyISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Lima' });
     if (hoyISO <= BROCHURE_HASTA) {
       await new Promise(r => setTimeout(r, 3000));
