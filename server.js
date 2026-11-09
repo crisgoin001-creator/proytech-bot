@@ -482,7 +482,7 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
-const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /responder 51XXXXXXXXX — el bot responde ahora un mensaje que quedó sin respuesta\n• /info 51XXXXXXXXX — enviar detalle técnico + brochure de Academy\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /responder 51XXXXXXXXX — el bot responde ahora un mensaje que quedó sin respuesta\n• /info 51XXXXXXXXX — enviar detalle técnico + brochure de Academy\n• /checklist 51XXXXXXXXX — enviar el checklist \"Antes de energizar\"\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
 
 // Revisa el correo de la empresa y convierte compromisos con fecha en plazos del calendario
 async function revisarCorreos(horas = 3) {
@@ -715,6 +715,8 @@ async function procesarComandoAdmin(texto) {
     retenidos.delete(me[1]);
     await enviarWhatsApp(ADMIN_PHONE, `✅ Enviado a ${me[1]} (${textos.length} mensaje${textos.length > 1 ? 's' : ''}).`); return true;
   }
+  const mck = t.match(/^\/checklist\s+\+?(\d{8,15})$/i);
+  if (mck) { const okc = await enviarChecklist(mck[1], true); await enviarWhatsApp(ADMIN_PHONE, okc ? `📋 Checklist enviado a ${mck[1]}.` : `⚠️ No pude enviar el checklist a ${mck[1]}.`); return true; }
   const mi = t.match(/^\/info\s+\+?(\d{8,15}|[A-Z]{2}\.[A-Za-z0-9.]+)$/i);
   if (mi) { const ok = await enviarInfoAcademy(mi[1]); await enviarWhatsApp(ADMIN_PHONE, ok ? `📄 Detalle técnico + brochure enviados a ${mi[1]}.` : `⚠️ No pude enviar la información a ${mi[1]}.`); return true; }
   const muc = t.match(/^\/ultimoscupos(\s+enviar)?(?:\s+(.+))?$/i);
@@ -959,6 +961,14 @@ async function procesarMensaje(msg, contacto) {
     return;
   }
 
+  // Imán CHECKLIST (Reels FB/IG): Christian lo aprueba con /checklist tel; automático si CHECKLIST_AUTO=si o sin modo supervisado
+  if (/\bcheck\s*-?\s*list\b/i.test(texto || '') && !(s.historial || []).some(m => /\[Documento: checklist PDF\]/.test(m.content || ''))) {
+    if (process.env.CHECKLIST_AUTO === 'si' || !MODO_SUPERVISADO) { const okc = await enviarChecklist(tel); await enviarWhatsApp(ADMIN_PHONE, `📋 Checklist ${okc ? 'enviado' : 'NO enviado'} a ${s.nombre || tel}.`); }
+    else await enviarWhatsApp(ADMIN_PHONE, `📋 +${tel}${s.nombre ? ' (' + s.nombre + ')' : ''} pidió el CHECKLIST. Para enviarlo responde: /checklist ${tel}`);
+    await guardarSesion(s);
+    return;
+  }
+
   let out;
   try {
     out = await consultarClaude(s, msg._imagen || null);
@@ -1104,6 +1114,25 @@ const INSTRUCCION_PASO = {
   1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → visitar el laboratorio y ver los equipos Siemens reales; Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
   2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (3–4 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: separar su vacante con S/ 200; Servicios: preparar su cotización o coordinar la visita). Estructura: 1) pregunta amable si le quedó alguna consulta; 2) ofrece como ayuda (no como oferta comercial) darle más detalles por una llamada de WhatsApp con uno de nuestros ingenieros o que nos visite en el laboratorio; 3) si le interesa, que puede separar su vacante con S/ 200 con la garantía de reembolso si el curso no inicia (Servicios: preparar su cotización o coordinar una visita técnica). Urgencia SOLO si es real (grupo con fecha de inicio, máximo 2 alumnos por estación). Sin pedir número y sin dar nombres. Divide el texto en DOS mensajes separados por "||": el primero con los puntos 1 y 2 (consulta + llamada o visita); el segundo, corto, con el punto 3 (separar con garantía). Deséale buena tarde/noche según la hora.',
 };
+// Imán CHECKLIST: saludo + PDF "Antes de energizar un tablero" + pedir nombre y empresa
+async function enviarChecklist(tel, manual = false) {
+  const s = await obtenerSesion(tel);
+  s.linea = 'servicios';
+  aprobados.add(tel); if (manual) aprobadosManual.add(tel);
+  try {
+    const okT = await enviarYRegistrar(s, `${saludoSegunHora().saludo}, gracias por escribirnos. Le comparto nuestro checklist "Antes de energizar un tablero" 📋`);
+    if (!okT) return false;
+    await new Promise(r => setTimeout(r, 2000));
+    if (await enviarDocumento(tel, `${URL_PUBLICA}/archivos/checklist-antes-de-energizar-proytech.pdf`, 'Checklist Antes de Energizar un Tablero - ProyTech.pdf', 'Checklist ProyTech 📋')) {
+      s.historial.push({ role: 'assistant', content: '[Documento: checklist PDF]' }); await db.guardarMensaje(tel, 'assistant', '[Documento: checklist PDF]');
+    }
+    await new Promise(r => setTimeout(r, 2000));
+    await enviarYRegistrar(s, '¿Me indica su nombre y la empresa donde trabaja? Así, si tiene un tablero por energizar o una falla, le ayudamos directamente.');
+  } finally { aprobados.delete(tel); aprobadosManual.delete(tel); }
+  if (!s.etapa || s.etapa === 'nuevo') s.etapa = 'perfilando';
+  await guardarSesion(s);
+  return true;
+}
 // Envía al instante el detalle técnico de Academy + brochure (Christian lo pide con /info tel)
 async function enviarInfoAcademy(tel) {
   const s = await obtenerSesion(tel);
