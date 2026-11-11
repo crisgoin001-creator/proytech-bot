@@ -57,5 +57,6 @@ module.exports = {
   citasProximas: horas => q(async () => (await api.get('/citas', { params: { select: '*', inicio: `gte.${new Date().toISOString()}`, order: 'inicio', limit: 50 } })).data
     .filter(c => Date.parse(c.inicio) - Date.now() <= horas * 36e5), []),
   marcarCita: (id, campos) => q(() => api.patch('/citas', campos, { params: { id: `eq.${id}` } })),
+  encuestas: () => q(async () => (await api.get('/mensajes', { params: { contenido: 'like.[Encuesta demo]*', select: 'tel,contenido,creado', order: 'id.asc', limit: 2000 } })).data, []),
   listarLeads: () => q(async () => (await api.get('/leads', { params: { select: 'tel,nombre,linea,etapa,origen,seguimientos,actualizado', etapa: 'not.in.(perdido)', order: 'actualizado.desc', limit: 30 } })).data, [])
 };
