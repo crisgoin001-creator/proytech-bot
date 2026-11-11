@@ -286,7 +286,7 @@ ESTADO DE LA CONVERSACIÓN
 - Hora actual en Lima: ${hora}. Si es el primer mensaje de la conversación (o el cliente saluda de nuevo tras mucho tiempo), empieza con "${saludo}" seguido del nombre del cliente si lo conoces. Nunca uses otro saludo de horario distinto.
 - Origen del contacto: ${s.origen || 'desconocido'}
 - Línea detectada hasta ahora: ${s.linea || 'sin definir'}
-- Veces que ya preguntaste el horario de la encuesta: ${(s.historial || []).filter(m => m.role === 'assistant' && /s[aá]bado en la ma[nñ]ana/i.test(m.content || '') && /\?/.test(m.content || '')).length}. Si son 2 o más, NO vuelvas a preguntar el horario ni listes las opciones: responde lo que pide y ofrece el brochure o la demo.
+- Veces que ya pediste la encuesta (permiso o pregunta de horario): ${(s.historial || []).filter(m => m.role === 'assistant' && /(preguntas r[aá]pidas|s[aá]bado en la ma[nñ]ana)/i.test(m.content || '') && /\?/.test(m.content || '')).length}. Si son 2 o más y el cliente no ha respondido la encuesta, NO la vuelvas a pedir: responde lo que pide y ofrece el brochure o la demo. Si el cliente rechazó la encuesta, no la vuelvas a pedir nunca.
 - Encuesta de horario ya registrada: ${((s.historial || []).filter(m => /^\[Encuesta demo\]/.test(m.content || '')).pop() || {}).content || 'no'}
 - Consulta pendiente con Christian: ${s.pendiente ? 'sí (no vuelvas a consultar lo mismo; mantén al cliente atendido)' : 'no'}
 - Documentos ya enviados en este chat: ${['brochure', 'temario'].filter(d => (s.historial || []).some(m => new RegExp('\\[Documento: ' + d, 'i').test(m.content || ''))).join(', ') || 'ninguno'}. Si vuelve a pedir uno que ya se envió, dile que se lo enviamos arriba en el chat y pregúntale si le llegó; NO prometas enviarlo de nuevo. Solo si dice que no le llegó, marca enviar_brochure=true.
@@ -496,7 +496,7 @@ async function enviarWhatsApp(to, body) {
   }
 }
 
-const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /responder 51XXXXXXXXX — el bot responde ahora un mensaje que quedó sin respuesta\n• /info 51XXXXXXXXX — enviar detalle técnico + brochure de Academy\n• /checklist 51XXXXXXXXX — enviar el checklist \"Antes de energizar\"\n• /encuesta — resultados de la encuesta de horario (demo)\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
+const AYUDA_ADMIN = 'Comandos:\n• /status — resumen del negocio\n• /saldo — saldo de la IA\n• /responder 51XXXXXXXXX — el bot responde ahora un mensaje que quedó sin respuesta\n• /info 51XXXXXXXXX — enviar detalle técnico + brochure de Academy\n• /checklist 51XXXXXXXXX — enviar el checklist \"Antes de energizar\"\n• /encuesta — resultados de la encuesta de horario (demo)\n• /reporte — dejar ahora el reporte Academy en el correo (para Claude)\n• /ultimoscupos [fecha] — campaña últimos cupos (vista previa)\n• /agenda [días] — eventos agendados\n• /vencimientos — plazos próximos 30 días\n• /correo [horas] — revisar correo ahora\n• /libres — horarios disponibles\n• /agendar 51XXXXXXXXX AAAA-MM-DD HH:MM [min] título\n• /pendientes · /leads · /datos\n• /r 51XXXXXXXXX texto · /bot 51XXXXXXXXX';
 
 // Revisa el correo de la empresa y convierte compromisos con fecha en plazos del calendario
 async function revisarCorreos(horas = 3) {
@@ -729,6 +729,7 @@ async function procesarComandoAdmin(texto) {
     retenidos.delete(me[1]);
     await enviarWhatsApp(ADMIN_PHONE, `✅ Enviado a ${me[1]} (${textos.length} mensaje${textos.length > 1 ? 's' : ''}).`); return true;
   }
+  if (/^\/reporte$/i.test(t)) { const ok = await depositarReporteAcademy(true); await enviarWhatsApp(ADMIN_PHONE, ok ? '📨 Reporte Academy depositado en el correo de la empresa.' : '⚠️ No pude depositar el reporte (revisa IMAP).'); return true; }
   if (/^\/encuesta$/i.test(t)) { await enviarWhatsApp(ADMIN_PHONE, await conteoEncuesta()); return true; }
   const mck = t.match(/^\/checklist\s+\+?(\d{8,15})$/i);
   if (mck) { const okc = await enviarChecklist(mck[1], true); await enviarWhatsApp(ADMIN_PHONE, okc ? `📋 Checklist enviado a ${mck[1]}.` : `⚠️ No pude enviar el checklist a ${mck[1]}.`); return true; }
@@ -1065,6 +1066,11 @@ async function procesarMensaje(msg, contacto) {
   }
   } finally { if (autoInformes) aprobados.delete(tel); }
 
+  // Rechazar la encuesta de horario no es rechazar el curso: no se marca como perdido
+  if (out.etapa === 'perdido') {
+    const previo = (s.historial || []).filter(m => m.role === 'assistant' && !/^\[/.test(m.content || '')).slice(-2, -1)[0];
+    if (previo && /preguntas r[aá]pidas/i.test(previo.content || '')) out.etapa = 'perfilando';
+  }
   if (out.etapa) s.etapa = out.etapa;
   // un lead comercial que ya recibió respuesta entra al embudo de seguimiento
   if (s.etapa === 'nuevo' && ['servicios', 'academy'].includes(s.linea)) s.etapa = 'perfilando';
@@ -1127,8 +1133,8 @@ function fechaPlantilla(s, i) { // día N tras el último mensaje del cliente, a
 }
 const INSTRUCCION_PASO = {
   0: 'Han pasado unos minutos y el cliente no responde. Escribe UN mensaje muy breve (1–2 líneas) preguntando si pudo revisar la información y si desea algún detalle adicional (Academy: temario, horarios, forma de pago; Servicios: alcance, plazos, referencias). Una sola pregunta, cordial, sin presión.',
-  1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → la clase demo gratuita de 2 horas en el laboratorio con equipos Siemens reales (si aún no dio su horario preferido, pregúntaselo con las 3 opciones de la encuesta); Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
-  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (3–4 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: si no respondió la encuesta de horario, pregúntale qué horario le acomoda para la demo; si ya la respondió, separar su cupo para enero con S/ 200; Servicios: preparar su cotización o coordinar la visita). Estructura: 1) pregunta amable si le quedó alguna consulta; 2) ofrece como ayuda (no como oferta comercial) darle más detalles por una llamada de WhatsApp con uno de nuestros ingenieros o que nos visite en el laboratorio; 3) si le interesa, que puede separar su vacante con S/ 200 con la garantía de reembolso si el curso no inicia (Servicios: preparar su cotización o coordinar una visita técnica). Urgencia SOLO si es real (grupo con fecha de inicio, máximo 2 alumnos por estación). Sin pedir número y sin dar nombres. Divide el texto en DOS mensajes separados por "||": el primero con los puntos 1 y 2 (consulta + llamada o visita); el segundo, corto, con el punto 3 (separar con garantía). Deséale buena tarde/noche según la hora.',
+  1: 'Ha pasado aproximadamente una hora sin respuesta. Escribe UN mensaje persuasivo y breve (2–3 líneas) que aporte un beneficio NUEVO y concreto que aún no mencionaste, e invita a conocer nuestras instalaciones: Academy → la clase demo gratuita de 2 horas en el laboratorio con equipos Siemens reales (si aún no respondió la encuesta y no la rechazó, pídele permiso para 2 preguntas rápidas); Servicios → una visita técnica o reunión sin compromiso. Cierra con una pregunta fácil de responder (ej. "¿Le acomoda pasar esta semana?"). No confirmes fechas: si acepta, se coordina después.',
+  2: 'Es el cierre del día y el cliente no ha respondido. Escribe UN mensaje breve (3–4 líneas): pregunta con amabilidad si le quedó alguna otra consulta y propone el siguiente paso concreto (Academy: si no respondió la encuesta y no la rechazó, pídele permiso para 2 preguntas rápidas sobre el horario de la demo; si ya la respondió, separar su cupo para enero con S/ 200; Servicios: preparar su cotización o coordinar la visita). Estructura: 1) pregunta amable si le quedó alguna consulta; 2) ofrece como ayuda (no como oferta comercial) darle más detalles por una llamada de WhatsApp con uno de nuestros ingenieros o que nos visite en el laboratorio; 3) si le interesa, que puede separar su vacante con S/ 200 con la garantía de reembolso si el curso no inicia (Servicios: preparar su cotización o coordinar una visita técnica). Urgencia SOLO si es real (grupo con fecha de inicio, máximo 2 alumnos por estación). Sin pedir número y sin dar nombres. Divide el texto en DOS mensajes separados por "||": el primero con los puntos 1 y 2 (consulta + llamada o visita); el segundo, corto, con el punto 3 (separar con garantía). Deséale buena tarde/noche según la hora.',
 };
 // Encuesta de horario para la clase demo / grupo de enero (sondeo de mercado)
 const encuestaRAM = [];
@@ -1145,6 +1151,28 @@ async function registrarEncuesta(tel, s, out) {
   if (!m || m === '-') return; // se avisa cuando la respuesta está completa
   await enviarWhatsApp(ADMIN_PHONE, `🎓 *Encuesta demo* — ${nombre || '+' + tel}: ${h} · inicio ${m}\n\n${await conteoEncuesta()}`);
 }
+// Reporte diario de Academy (encuesta + leads + último mensaje) que se deposita en el correo para que Claude lo gestione
+async function generarReporteAcademy() {
+  const esc = v => `"${String(v ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+  const enc = db.activo ? await db.encuestas() : encuestaRAM;
+  const ult = new Map(); for (const f of enc) ult.set(f.tel, f);
+  const g = (c, k) => ((c || '').match(new RegExp(k + '=([^|]+)')) || [])[1]?.trim() || '';
+  const leads = (await db.leadsTodos()).filter(l => l.linea === 'academy' && l.tel !== ADMIN_PHONE);
+  const msgs = await db.mensajesDesde(new Date(Date.now() - 14 * DIA).toISOString());
+  const ultimoCliente = new Map(); for (const m of msgs) if (m.rol === 'user') ultimoCliente.set(m.tel, `${m.creado} · ${m.contenido}`.slice(0, 300));
+  const encCSV = ['tel,nombre,horario,inicio,fecha', ...[...ult.values()].map(f => [f.tel, g(f.contenido, 'nombre'), g(f.contenido, 'horario'), g(f.contenido, 'inicio'), f.creado].map(esc).join(','))].join('\n');
+  const leadCSV = ['tel,nombre,etapa,origen,resumen,creado,actualizado,ultimo_mensaje_cliente', ...leads.map(l => [l.tel, l.nombre, l.etapa, l.origen, l.resumen, l.creado, l.actualizado, ultimoCliente.get(l.tel) || ''].map(esc).join(','))].join('\n');
+  return `REPORTE ACADEMY — ${hoyLima()}\n\n${await conteoEncuesta()}\n\n=== ENCUESTA (CSV) ===\n${encCSV}\n=== FIN ENCUESTA ===\n\n=== LEADS ACADEMY (CSV) ===\n${leadCSV}\n=== FIN LEADS ===\n`;
+}
+let ultimoReporteDia = '';
+async function depositarReporteAcademy(forzar = false) {
+  const dia = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Lima' });
+  if (!forzar && ultimoReporteDia === dia) return null;
+  const ok = await correo.depositar(`[BOT] Reporte Academy ${dia}`, await generarReporteAcademy());
+  if (ok) ultimoReporteDia = dia;
+  return ok;
+}
+
 async function conteoEncuesta() {
   const filas = db.activo ? await db.encuestas() : encuestaRAM;
   const ult = new Map();
@@ -1199,7 +1227,7 @@ async function seguimientoLibre(s, paso) {
   // Academy, paso de 1 h: si aún no recibió el temario, se lo damos como valor nuevo (texto breve + PDF)
   const darTemario = paso === 1 && s.linea === 'academy' && !tieneTemario(s);
   const instr = darTemario
-    ? 'Ha pasado aproximadamente una hora sin respuesta y aún no recibió el detalle técnico. Sigue el PROCESO OBLIGATORIO (PASO A): una línea de introducción y los 3 módulos del temario con 1–2 viñetas "• " cada uno (resumidos del CONOCIMIENTO), menciona en 1 línea que abrimos grupos desde enero y haremos una clase demo gratuita, y cierra con la pregunta de la ENCUESTA DE HORARIO (sábado en la mañana, domingo en la mañana o una noche entre semana).'
+    ? 'Ha pasado aproximadamente una hora sin respuesta y aún no recibió el detalle técnico. Sigue el PROCESO OBLIGATORIO (PASO A): una línea de introducción y los 3 módulos del temario con 1–2 viñetas "• " cada uno (resumidos del CONOCIMIENTO), menciona en 1 línea que abrimos grupos desde enero y haremos una clase demo gratuita, y cierra pidiendo permiso para la ENCUESTA: "Para definir el mejor horario de la clase demo gratuita, ¿nos ayudaría respondiendo 2 preguntas rápidas?".'
     : INSTRUCCION_PASO[paso];
   const mensajes = [...s.historial, { role: 'user', content: `[Instrucción interna] ${instr} No repitas frases ya dichas en la conversación. Mantén usted/tú según el cliente. Devuelve solo el texto.` }];
   const texto = (await llamarModelo(ESTILO + '\n\nCONOCIMIENTO\n' + CONOCIMIENTO + '\n\nFECHA DE HOY (Lima): ' + hoyLima() + '\n\nDATOS CONFIRMADOS\n' + bloqueDatosConfirmados(), mensajes, 300)).trim();
@@ -1290,6 +1318,7 @@ async function enviarResumenDiario() {
 setInterval(() => ejecutarSeguimientos().catch(e => console.error(e)), 30 * 60 * 1000);
 setInterval(() => procesarEmbudo().catch(e => console.error(e)), 2 * 60 * 1000);
 // Render (plan gratis) duerme tras 15 min sin tráfico: en horario comercial se mantiene despierto para cumplir los seguimientos de 10 min / 1 h
+setInterval(() => { if (horaLima() >= 7) depositarReporteAcademy().catch(e => console.error('reporte academy', e.message)); }, 15 * 60 * 1000);
 setInterval(() => { const h = horaLima(); if (h >= 7 && h < 22 && process.env.RENDER_EXTERNAL_URL) axios.get(process.env.RENDER_EXTERNAL_URL, { timeout: 15000 }).catch(() => {}); }, 10 * 60 * 1000);
 
 // ---------- Endpoints ----------
@@ -1326,6 +1355,7 @@ app.post('/salud/simular', async (req, res) => {
   return simular(req, res, 'libre');
 });
 app.get('/salud/simular', (req, res) => simular(req, res));
+app.get('/salud/reporte-prueba', async (req, res) => { if (db.activo || new Date().toISOString().slice(0, 10) > SIM_LIBRE_HASTA) return res.sendStatus(403); res.type('text/plain').send(await generarReporteAcademy()); });
 async function simular(req, res, casoForzado) {
   const caso = casoForzado || req.query.caso;
   if (Date.now() - simUso.t > HORA) simUso = { t: Date.now(), n: 0 };

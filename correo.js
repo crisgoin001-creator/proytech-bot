@@ -7,7 +7,7 @@ const USER = process.env.IMAP_USER || '';
 const PASS = process.env.IMAP_PASS || '';
 const activo = !!(USER && PASS);
 const BUZONES = (process.env.IMAP_BUZONES || 'INBOX,INBOX.Sent').split(',').map(s => s.trim());
-const RUIDO = /no-?reply|newsletter|marketing|mailer-daemon|notifications?@|news@|promo|webinar/i;
+const RUIDO = /\[BOT\]|no-?reply|newsletter|marketing|mailer-daemon|notifications?@|news@|promo|webinar/i;
 
 // Devuelve correos recibidos/enviados desde `desde` (Date): [{id, buzon, de, para, asunto, fecha, texto}]
 async function correosDesde(desde, max = 25) {
@@ -46,4 +46,18 @@ async function probar() {
   finally { try { await cli.logout(); } catch (_) {} }
 }
 
-module.exports = { activo, correosDesde, probar };
+// Deja un reporte del bot como correo (IMAP APPEND, sin SMTP) en el buzón de la empresa, para que Claude lo lea
+async function depositar(asunto, texto, buzon = process.env.IMAP_BUZON_REPORTES || 'INBOX') {
+  if (!activo) return false;
+  const cli = new ImapFlow({ host: HOST, port: 993, secure: true, auth: { user: USER, pass: PASS }, logger: false });
+  try {
+    await cli.connect();
+    const raw = [`From: ProyTech Bot <${USER}>`, `To: ${USER}`, `Subject: ${asunto}`, `Date: ${new Date().toUTCString()}`,
+      `Message-ID: <bot-${Date.now()}@proytechautomation.com>`, 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: 8bit', '', texto].join('\r\n');
+    await cli.append(buzon, Buffer.from(raw, 'utf8'), ['\\Seen']);
+    return true;
+  } catch (e) { console.error('IMAP append:', e.message); return false; }
+  finally { try { await cli.logout(); } catch (_) {} }
+}
+
+module.exports = { activo, correosDesde, probar, depositar };
