@@ -205,7 +205,7 @@ AGENDA (visitas, reuniones, llamadas, visitas técnicas a planta)
 - Ofrece "coordinar una visita" como siguiente paso, nunca como algo ya agendado.
 ESTRATEGIA COMERCIAL (venta consultiva, persuasión ética)
 - Cultura peruana: al cliente le da confianza el trato cercano, que le insistan con amabilidad y que lo llamen. Usa su nombre, sé cálida y muestra interés genuino en su caso.
-- LLAMADA O VISITA (como servicio, no como oferta): cuando el cliente muestre interés, dudas o diga que lo va a pensar, ofrécele UNA vez opciones para conocer más, en este orden: "Si gusta, podemos darle más detalles del curso por una llamada de WhatsApp con uno de nuestros ingenieros, o puede visitarnos en el laboratorio de Surquillo. Y si ya le interesa, puede separar su vacante con S/ 200, con la garantía de que si el curso no inicia se le reembolsa." Adapta a Servicios: detalles por llamada con uno de nuestros ingenieros o una visita técnica sin compromiso. No pidas su número (la llamada es por este chat) ni des nombres del equipo.
+- LLAMADA O VISITA (como servicio, no como oferta): cuando el cliente muestre interés, dudas o diga que lo va a pensar, ofrécele UNA vez opciones para conocer más, en este orden: "Si gusta, podemos darle más detalles del curso por una llamada de WhatsApp con uno de nuestros ingenieros, o puede visitarnos en el laboratorio de Surquillo. Y si quiere probar antes, puede anotarse en nuestra clase demo gratuita." Adapta a Servicios: detalles por llamada con uno de nuestros ingenieros o una visita técnica sin compromiso. No pidas su número (la llamada es por este chat) ni des nombres del equipo.
 - Si el cliente ACEPTA la llamada o da un horario: consultar_admin=true y pregunta_admin="📞 Acepta llamada por WhatsApp — horario: …". En la respuesta agradece y di que le confirmas la hora en un momento. Nunca confirmes tú la hora.
 - Entiende primero la necesidad (situación → problema → impacto) y conecta el curso/servicio con su objetivo concreto (empleo, ascenso, reducir paradas, seguridad de la planta).
 - Destaca valor real, nunca inventado: práctica en equipos reales, máximo 2 alumnos por estación, certificado, soporte post-curso; en servicios: experiencia en normativas y marcas indicadas.
@@ -721,7 +721,7 @@ async function procesarComandoAdmin(texto) {
   if (mi) { const ok = await enviarInfoAcademy(mi[1]); await enviarWhatsApp(ADMIN_PHONE, ok ? `📄 Detalle técnico + brochure enviados a ${mi[1]}.` : `⚠️ No pude enviar la información a ${mi[1]}.`); return true; }
   const muc = t.match(/^\/ultimoscupos(\s+enviar)?(?:\s+(.+))?$/i);
   if (muc) {
-    const fecha = (muc[2] || '14 de noviembre').trim();
+    const fecha = (muc[2] || 'enero').trim();
     const leads = (await db.leadsTodos()).filter(l => l.linea === 'academy' && !['ganado', 'perdido'].includes(l.etapa) && l.tel !== ADMIN_PHONE && Date.now() - Date.parse(l.actualizado) < 30 * DIA);
     if (!muc[1]) {
       await enviarWhatsApp(ADMIN_PHONE, `📣 *Últimos cupos* — vista previa\nDestinatarios: ${leads.length} leads de Academy (no cerrados, activos en 30 días)\nFecha de inicio: sábado ${fecha}\nCosto aprox.: US$ ${(leads.length * 0.07).toFixed(2)}\n\nPara enviar: */ultimoscupos enviar ${fecha}*`);
